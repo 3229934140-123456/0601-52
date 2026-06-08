@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils';
 
 interface StatusBadgeProps {
-  status: 'success' | 'failed' | 'running' | 'pending' | 'cancelled' | 'skipped' | 'approved' | 'rejected' | 'released';
+  status: 'success' | 'failed' | 'running' | 'pending' | 'cancelled' | 'skipped' | 'approved' | 'rejected' | 'released' | 'rolled_back';
   size?: 'sm' | 'md';
   className?: string;
 }
@@ -51,6 +51,11 @@ const statusConfig: Record<string, { label: string; className: string; dotColor:
     label: '已发布',
     className: 'bg-success-500/10 text-success-500 border-success-500/20',
     dotColor: 'bg-success-500',
+  },
+  rolled_back: {
+    label: '已回滚',
+    className: 'bg-warning-500/10 text-warning-500 border-warning-500/20',
+    dotColor: 'bg-warning-500',
   },
 };
 

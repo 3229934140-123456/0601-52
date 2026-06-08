@@ -26,10 +26,43 @@ function generateRunningLogs(stageId: string): BuildLog[] {
   return logs;
 }
 
+function generateFailedLogs(stageId: string): BuildLog[] {
+  const logs: BuildLog[] = [];
+  const messages = [
+    { level: 'info' as const, msg: 'Starting build process...' },
+    { level: 'info' as const, msg: 'Checking cache for dependencies' },
+    { level: 'info' as const, msg: 'Installing packages...' },
+    { level: 'warn' as const, msg: 'Warning: deprecated package version' },
+    { level: 'error' as const, msg: 'ERROR: Failed to compile - syntax error at line 42' },
+    { level: 'error' as const, msg: 'ERROR: Build failed with exit code 1' },
+  ];
+
+  for (let i = 0; i < messages.length; i++) {
+    const time = new Date();
+    time.setSeconds(time.getSeconds() + i);
+    logs.push({
+      id: `log-${stageId}-${i}`,
+      stageId,
+      timestamp: time.toISOString(),
+      level: messages[i].level,
+      message: messages[i].msg,
+    });
+  }
+  return logs;
+}
+
+interface RerunRecord {
+  stageId: string;
+  rerunTime: string;
+  previousStatus: string;
+  previousEndTime?: string;
+  failureReason?: string;
+}
+
 function generateTimeline(
   build: Build,
   testConclusion?: TestConclusion,
-  rerunHistory?: { stageId: string; rerunTime: string }[]
+  rerunHistory?: RerunRecord[]
 ): BuildTimelineEvent[] {
   const events: BuildTimelineEvent[] = [];
   const startTime = new Date(build.startTime);
@@ -54,17 +87,74 @@ function generateTimeline(
     timestamp: queueTime.toISOString(),
   });
 
+  const rerunStageIds = new Set(rerunHistory?.map((r) => r.stageId) || []);
+
   build.stages.forEach((stage) => {
     const stageStart = stage.startTime;
-    events.push({
-      id: `${stage.id}-start`,
-      buildId: build.id,
-      type: 'stage_start',
-      title: `${stage.stageName} 开始`,
-      timestamp: stageStart,
-      stageId: stage.id,
-      status: stage.status,
-    });
+    const hasRerun = rerunStageIds.has(stage.id);
+
+    if (stage.status === 'pending' && !hasRerun) {
+      return;
+    }
+
+    if (stage.status !== 'pending' || hasRerun) {
+      events.push({
+        id: `${stage.id}-start`,
+        buildId: build.id,
+        type: 'stage_start',
+        title: `${stage.stageName} 开始`,
+        timestamp: stageStart,
+        stageId: stage.id,
+        status: stage.status,
+      });
+    }
+
+    if (hasRerun && rerunHistory) {
+      const stageReruns = rerunHistory.filter((r) => r.stageId === stage.id);
+      stageReruns.forEach((rerun, idx) => {
+        if (rerun.previousStatus === 'failed' && rerun.previousEndTime) {
+          events.push({
+            id: `${stage.id}-end-before-rerun-${idx}`,
+            buildId: build.id,
+            type: 'stage_end',
+            title: `${stage.stageName} 失败（第${idx + 1}次）`,
+            timestamp: rerun.previousEndTime,
+            stageId: stage.id,
+            status: 'failed',
+          });
+
+          events.push({
+            id: `${stage.id}-failed-before-rerun-${idx}`,
+            buildId: build.id,
+            type: 'failed',
+            title: `${stage.stageName} 执行失败`,
+            description: rerun.failureReason || '阶段执行出现错误',
+            timestamp: rerun.previousEndTime,
+            stageId: stage.id,
+          });
+        }
+
+        events.push({
+          id: `${stage.id}-rerun-${idx}`,
+          buildId: build.id,
+          type: 'stage_rerun',
+          title: `${stage.stageName} 重跑`,
+          description: `第${idx + 1}次重跑`,
+          timestamp: rerun.rerunTime,
+          stageId: stage.id,
+        });
+
+        events.push({
+          id: `${stage.id}-restart-${idx}`,
+          buildId: build.id,
+          type: 'stage_start',
+          title: `${stage.stageName} 重新开始`,
+          timestamp: rerun.rerunTime,
+          stageId: stage.id,
+          status: 'running',
+        });
+      });
+    }
 
     if (stage.status !== 'running' && stage.status !== 'pending') {
       const stageEnd = stage.endTime || stageStart;
@@ -79,35 +169,19 @@ function generateTimeline(
       });
 
       if (stage.status === 'failed') {
+        const errorLog = stage.logs.find((l) => l.level === 'error');
         events.push({
           id: `${stage.id}-failed-evt`,
           buildId: build.id,
           type: 'failed',
           title: `${stage.stageName} 执行失败`,
-          description: '阶段执行出现错误',
+          description: errorLog?.message || '阶段执行出现错误',
           timestamp: stageEnd,
           stageId: stage.id,
         });
       }
     }
   });
-
-  if (rerunHistory) {
-    rerunHistory.forEach((rerun, idx) => {
-      const stage = build.stages.find((s) => s.id === rerun.stageId);
-      if (stage) {
-        events.push({
-          id: `${rerun.stageId}-rerun-${idx}`,
-          buildId: build.id,
-          type: 'stage_rerun',
-          title: `${stage.stageName} 重跑`,
-          description: '手动触发阶段重跑',
-          timestamp: rerun.rerunTime,
-          stageId: rerun.stageId,
-        });
-      }
-    });
-  }
 
   if (build.status === 'success' || build.status === 'failed') {
     events.push({
@@ -136,13 +210,21 @@ function generateTimeline(
   return events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 }
 
+interface RerunRecord {
+  stageId: string;
+  rerunTime: string;
+  previousStatus: string;
+  previousEndTime?: string;
+  failureReason?: string;
+}
+
 interface BuildState {
   builds: Build[];
   currentBuild: Build | null;
   selectedStage: BuildStage | null;
   isLoading: boolean;
   testConclusions: Record<string, TestConclusion>;
-  rerunHistory: Record<string, { stageId: string; rerunTime: string }[]>;
+  rerunHistory: Record<string, RerunRecord[]>;
   setCurrentBuild: (buildId: string) => void;
   setSelectedStage: (stage: BuildStage | null) => void;
   getBuildsByProject: (projectId: string) => Build[];
@@ -244,22 +326,30 @@ export const useBuildStore = create<BuildState>((set, get) => ({
   rerunStage: (buildId, stageId) => {
     const now = new Date().toISOString();
     set((state) => {
-      const updatedBuilds = state.builds.map((build) => {
-        if (build.id !== buildId) return build;
-        const updatedStages = build.stages.map((stage) =>
-          stage.id === stageId
+      const build = state.builds.find((b) => b.id === buildId);
+      const stage = build?.stages.find((s) => s.id === stageId);
+
+      const prevStatus = stage?.status || 'pending';
+      const prevEndTime = stage?.endTime;
+      const errorLog = stage?.logs.find((l) => l.level === 'error');
+      const failureReason = errorLog?.message;
+
+      const updatedBuilds = state.builds.map((b) => {
+        if (b.id !== buildId) return b;
+        const updatedStages = b.stages.map((s) =>
+          s.id === stageId
             ? {
-                ...stage,
+                ...s,
                 status: 'running' as const,
                 startTime: now,
                 endTime: undefined,
                 duration: undefined,
-                logs: generateRunningLogs(stage.id),
+                logs: generateRunningLogs(s.id),
               }
-            : stage
+            : s
         );
         return {
-          ...build,
+          ...b,
           status: 'running' as const,
           endTime: undefined,
           duration: undefined,
@@ -276,7 +366,16 @@ export const useBuildStore = create<BuildState>((set, get) => ({
         : state.selectedStage;
 
       const prevHistory = state.rerunHistory[buildId] || [];
-      const newHistory = [...prevHistory, { stageId, rerunTime: now }];
+      const newHistory: RerunRecord[] = [
+        ...prevHistory,
+        {
+          stageId,
+          rerunTime: now,
+          previousStatus: prevStatus,
+          previousEndTime: prevEndTime,
+          failureReason,
+        },
+      ];
 
       return {
         builds: updatedBuilds,

@@ -14,11 +14,21 @@ export interface User {
 
 export type BuildStatus = 'success' | 'failed' | 'running' | 'pending' | 'cancelled';
 export type StageStatus = 'success' | 'failed' | 'running' | 'pending' | 'skipped';
-export type ReleaseStatus = 'pending' | 'approved' | 'rejected' | 'released';
+export type ReleaseStatus = 'pending' | 'approved' | 'rejected' | 'released' | 'rolled_back';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 export type Severity = 'critical' | 'major' | 'minor' | 'info';
 export type IssueType = 'bug' | 'vulnerability' | 'code_smell' | 'duplication';
 export type IssueStatus = 'open' | 'fixed' | 'false_positive';
+export type EnvironmentType = 'test' | 'staging' | 'production';
+export type AuditActionType =
+  | 'submit'
+  | 'approve'
+  | 'reject'
+  | 'download_artifact'
+  | 'modify_approvers'
+  | 'release'
+  | 'rollback'
+  | 'comment';
 
 export interface Project {
   id: string;
@@ -143,9 +153,25 @@ export interface Release {
   description: string;
   applicantId: string;
   status: ReleaseStatus;
+  environment: EnvironmentType;
   approvals: Approval[];
   releaseWindow?: ReleaseWindow;
+  auditLogs: AuditLog[];
+  releasedAt?: string;
+  rollbackReason?: string;
+  rolledBackAt?: string;
   createdAt: string;
+}
+
+export interface AuditLog {
+  id: string;
+  releaseId: string;
+  action: AuditActionType;
+  userId: string;
+  userName?: string;
+  description: string;
+  timestamp: string;
+  details?: Record<string, string>;
 }
 
 export interface Approval {
@@ -161,9 +187,12 @@ export interface Approval {
 export interface ReleaseWindow {
   id: string;
   name: string;
+  environment: EnvironmentType;
   startTime: string;
   endTime: string;
   description: string;
+  isFreeze?: boolean;
+  freezeReason?: string;
 }
 
 export interface Statistics {

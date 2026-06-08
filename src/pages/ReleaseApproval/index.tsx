@@ -22,6 +22,10 @@ import {
   Filter,
   UserPlus,
   Minus,
+  RotateCcw,
+  Cloud,
+  History,
+  Globe,
 } from 'lucide-react';
 import { Card } from '@/components/common/Card';
 import { Button } from '@/components/common/Button';
@@ -36,9 +40,42 @@ import { projects } from '@/data/projects';
 import { formatDateTime, formatRelativeTime } from '@/utils/date';
 import { formatFileSize } from '@/utils/format';
 import { cn } from '@/lib/utils';
-import type { Release, ReleaseStatus, NotificationSubscription, Artifact } from '@/types';
+import type { Release, ReleaseStatus, NotificationSubscription, Artifact, EnvironmentType, AuditLog } from '@/types';
 
-type ListFilter = 'all' | 'pending_me' | 'mine' | 'completed';
+type StatusFilter = 'all' | 'pending_me' | 'mine' | 'completed';
+type EnvFilter = EnvironmentType | 'all';
+
+const envLabels: Record<EnvironmentType | 'all', string> = {
+  all: '全部环境',
+  test: '测试',
+  staging: '预发',
+  production: '生产',
+};
+
+const envColors: Record<EnvironmentType, string> = {
+  test: 'bg-success-500/10 text-success-400 border-success-500/20',
+  staging: 'bg-warning-500/10 text-warning-400 border-warning-500/20',
+  production: 'bg-danger-500/10 text-danger-400 border-danger-500/20',
+};
+
+const envIcons: Record<EnvironmentType, typeof Globe> = {
+  test: Cloud,
+  staging: Cloud,
+  production: Globe,
+};
+
+function EnvBadge({ environment }: { environment: EnvironmentType }) {
+  const Icon = envIcons[environment];
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded border',
+      envColors[environment]
+    )}>
+      <Icon className="w-3 h-3" />
+      {envLabels[environment]}
+    </span>
+  );
+}
 
 export function ReleaseApproval() {
   const {
@@ -55,27 +92,39 @@ export function ReleaseApproval() {
     getMyReleases,
     getCompletedReleases,
     getReleasesByStatus,
+    getFilteredReleases,
+    getReleaseWindowsByEnv,
+    canApprove,
+    canRelease,
+    canRollback,
+    markAsReleased,
+    rollbackRelease,
+    recordDownloadArtifact,
     currentUserId,
   } = useReleaseStore();
 
   const { artifacts, getArtifactsByProject, downloadArtifact, getArtifactById } = useArtifactStore();
 
   const [activeTab, setActiveTab] = useState('list');
-  const [listFilter, setListFilter] = useState<ListFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [envFilter, setEnvFilter] = useState<EnvFilter>('all');
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
   const [showAddSubModal, setShowAddSubModal] = useState(false);
+  const [showRollbackModal, setShowRollbackModal] = useState(false);
 
   const [applyTitle, setApplyTitle] = useState('');
   const [applyProject, setApplyProject] = useState('');
   const [applyArtifact, setApplyArtifact] = useState('');
   const [applyWindow, setApplyWindow] = useState('');
   const [applyDesc, setApplyDesc] = useState('');
+  const [applyEnvironment, setApplyEnvironment] = useState<EnvironmentType>('test');
   const [applyApprovers, setApplyApprovers] = useState<string[]>(['user-4', 'user-6']);
 
   const [approveComment, setApproveComment] = useState('');
   const [rejectComment, setRejectComment] = useState('');
+  const [rollbackReason, setRollbackReason] = useState('');
 
   const [newSubEventType, setNewSubEventType] = useState<'build_failed' | 'release_approved' | 'release_rejected'>('build_failed');
   const [newSubChannel, setNewSubChannel] = useState<'email' | 'webhook' | 'in_app'>('email');
@@ -88,22 +137,44 @@ export function ReleaseApproval() {
   ];
 
   const filteredReleases = useMemo(() => {
-    switch (listFilter) {
+    let list: Release[] = [];
+
+    switch (statusFilter) {
       case 'pending_me':
-        return getPendingMyApproval();
+        list = getPendingMyApproval();
+        break;
       case 'mine':
-        return getMyReleases();
+        list = getMyReleases();
+        break;
       case 'completed':
-        return getCompletedReleases();
+        list = getCompletedReleases();
+        break;
       default:
-        return getReleasesByStatus('all');
+        list = getReleasesByStatus('all');
     }
-  }, [listFilter, releases, getPendingMyApproval, getMyReleases, getCompletedReleases, getReleasesByStatus]);
+
+    if (envFilter !== 'all') {
+      list = list.filter((r) => r.environment === envFilter);
+    }
+
+    return list;
+  }, [statusFilter, envFilter, releases, getPendingMyApproval, getMyReleases, getCompletedReleases, getReleasesByStatus]);
 
   const projectArtifacts = applyProject ? getArtifactsByProject(applyProject) : [];
+  const envWindows = useMemo(() => getReleaseWindowsByEnv(applyEnvironment), [applyEnvironment, getReleaseWindowsByEnv]);
 
   const canAddApprover = applyApprovers.length < 5;
   const canRemoveApprover = applyApprovers.length > 1;
+
+  const handleEnvironmentChange = (env: EnvironmentType) => {
+    setApplyEnvironment(env);
+    setApplyWindow('');
+
+    const defaultApprovers = env === 'production'
+      ? ['user-4', 'user-6', 'user-2']
+      : ['user-4', 'user-6'];
+    setApplyApprovers(defaultApprovers);
+  };
 
   const handleAddApprover = () => {
     if (!canAddApprover) return;
@@ -132,6 +203,7 @@ export function ReleaseApproval() {
       artifactId: applyArtifact,
       title: applyTitle,
       description: applyDesc,
+      environment: applyEnvironment,
       releaseWindowId: applyWindow || undefined,
       approvers: applyApprovers,
     });
@@ -142,6 +214,7 @@ export function ReleaseApproval() {
     setApplyArtifact('');
     setApplyWindow('');
     setApplyDesc('');
+    setApplyEnvironment('test');
     setApplyApprovers(['user-4', 'user-6']);
   };
 
@@ -171,6 +244,36 @@ export function ReleaseApproval() {
     setRejectComment('');
   };
 
+  const handleMarkReleased = () => {
+    if (!selectedRelease) return;
+    markAsReleased(selectedRelease.id);
+    const updated = releases.find((r) => r.id === selectedRelease.id);
+    if (updated) {
+      setSelectedRelease({ ...updated });
+    }
+  };
+
+  const handleRollback = () => {
+    if (!selectedRelease || !rollbackReason) return;
+    rollbackRelease(selectedRelease.id, rollbackReason);
+    const updated = releases.find((r) => r.id === selectedRelease.id);
+    if (updated) {
+      setSelectedRelease({ ...updated });
+    }
+    setShowRollbackModal(false);
+    setRollbackReason('');
+  };
+
+  const handleDownloadArtifact = () => {
+    if (!currentArtifact || !selectedRelease) return;
+    downloadArtifact(currentArtifact.id);
+    recordDownloadArtifact(selectedRelease.id);
+    const updated = releases.find((r) => r.id === selectedRelease.id);
+    if (updated) {
+      setSelectedRelease({ ...updated });
+    }
+  };
+
   const handleAddSubscription = () => {
     if (!newSubTarget && newSubChannel !== 'in_app') return;
 
@@ -195,12 +298,23 @@ export function ReleaseApproval() {
     ? getArtifactById(currentSelectedRelease.artifactId)
     : null;
 
-  const filterOptions: { key: ListFilter; label: string; count: number }[] = [
-    { key: 'all', label: '全部', count: getReleasesByStatus('all').length },
-    { key: 'pending_me', label: '待我审批', count: getPendingMyApproval().length },
-    { key: 'mine', label: '我提交的', count: getMyReleases().length },
-    { key: 'completed', label: '已结束', count: getCompletedReleases().length },
+  const statusFilterOptions: { key: StatusFilter; label: string; count: number }[] = [
+    { key: 'all', label: '全部', count: getFilteredReleases({ environment: envFilter }).length },
+    { key: 'pending_me', label: '待我审批', count: getPendingMyApproval().filter(r => envFilter === 'all' || r.environment === envFilter).length },
+    { key: 'mine', label: '我提交的', count: getMyReleases().filter(r => envFilter === 'all' || r.environment === envFilter).length },
+    { key: 'completed', label: '已结束', count: getCompletedReleases().filter(r => envFilter === 'all' || r.environment === envFilter).length },
   ];
+
+  const envFilterOptions: { key: EnvFilter; label: string }[] = [
+    { key: 'all', label: '全部' },
+    { key: 'test', label: '测试' },
+    { key: 'staging', label: '预发' },
+    { key: 'production', label: '生产' },
+  ];
+
+  const userCanApprove = currentSelectedRelease ? canApprove(currentSelectedRelease.id) : false;
+  const userCanRelease = currentSelectedRelease ? canRelease(currentSelectedRelease.id) : false;
+  const userCanRollback = currentSelectedRelease ? canRollback(currentSelectedRelease.id) : false;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -227,17 +341,17 @@ export function ReleaseApproval() {
 
       {activeTab === 'list' && (
         <div className="space-y-4">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             <div className="flex items-center gap-2">
               <Filter className="w-4 h-4 text-dark-400" />
               <div className="flex gap-1">
-                {filterOptions.map((opt) => (
+                {statusFilterOptions.map((opt) => (
                   <button
                     key={opt.key}
-                    onClick={() => setListFilter(opt.key)}
+                    onClick={() => setStatusFilter(opt.key)}
                     className={cn(
                       'px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-2',
-                      listFilter === opt.key
+                      statusFilter === opt.key
                         ? 'bg-primary-500/10 text-primary-400 border border-primary-500/20'
                         : 'text-dark-400 hover:text-white hover:bg-dark-800 border border-transparent'
                     )}
@@ -245,7 +359,7 @@ export function ReleaseApproval() {
                     {opt.label}
                     <span className={cn(
                       'text-xs px-1.5 py-0.5 rounded',
-                      listFilter === opt.key
+                      statusFilter === opt.key
                         ? 'bg-primary-500/20 text-primary-300'
                         : 'bg-dark-700 text-dark-500'
                     )}>
@@ -255,6 +369,29 @@ export function ReleaseApproval() {
                 ))}
               </div>
             </div>
+
+            <div className="h-6 w-px bg-dark-700" />
+
+            <div className="flex items-center gap-2">
+              <Globe className="w-4 h-4 text-dark-400" />
+              <div className="flex gap-1">
+                {envFilterOptions.map((opt) => (
+                  <button
+                    key={opt.key}
+                    onClick={() => setEnvFilter(opt.key as EnvFilter)}
+                    className={cn(
+                      'px-3 py-1.5 text-sm rounded-lg transition-colors',
+                      envFilter === opt.key
+                        ? 'bg-primary-500/10 text-primary-400 border border-primary-500/20'
+                        : 'text-dark-400 hover:text-white hover:bg-dark-800 border border-transparent'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="ml-auto text-sm text-dark-400">
               共 {filteredReleases.length} 条申请
             </div>
@@ -289,9 +426,14 @@ export function ReleaseApproval() {
                   setApproveComment={setApproveComment}
                   rejectComment={rejectComment}
                   setRejectComment={setRejectComment}
+                  canApprove={userCanApprove}
+                  canRelease={userCanRelease}
+                  canRollback={userCanRollback}
                   onApprove={handleApprove}
                   onReject={handleReject}
-                  onDownloadArtifact={() => currentArtifact && downloadArtifact(currentArtifact.id)}
+                  onMarkReleased={handleMarkReleased}
+                  onRollback={() => setShowRollbackModal(true)}
+                  onDownloadArtifact={handleDownloadArtifact}
                 />
               ) : (
                 <Card>
@@ -321,6 +463,7 @@ export function ReleaseApproval() {
                         <h3 className="font-semibold text-white">{window.name}</h3>
                       </div>
                     </div>
+                    <EnvBadge environment={window.environment} />
                   </div>
 
                   <div className="space-y-2">
@@ -363,11 +506,11 @@ export function ReleaseApproval() {
             <div className="space-y-3">
               {subscriptions.map((sub) => (
                 <SubscriptionItem
-                  key={sub.id}
-                  subscription={sub}
-                  onToggle={() => toggleSubscription(sub.id)}
-                  onRemove={() => removeSubscription(sub.id)}
-                />
+                key={sub.id}
+                subscription={sub}
+                onToggle={() => toggleSubscription(sub.id)}
+                onRemove={() => removeSubscription(sub.id)}
+              />
               ))}
               {subscriptions.length === 0 && (
                 <div className="text-center py-8 text-dark-400">
@@ -411,6 +554,38 @@ export function ReleaseApproval() {
               placeholder="请输入发布标题"
               className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50"
             />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-1.5">
+              目标环境
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {(['test', 'staging', 'production'] as EnvironmentType[]).map((env) => (
+                <button
+                  key={env}
+                  onClick={() => handleEnvironmentChange(env)}
+                  className={cn(
+                    'p-3 rounded-lg border text-left transition-colors',
+                    applyEnvironment === env
+                      ? 'bg-primary-500/10 border-primary-500/30'
+                      : 'bg-dark-700/30 border-transparent hover:bg-dark-700/50'
+                  )}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    {env === 'test' && <Cloud className="w-4 h-4 text-success-400" />}
+                    {env === 'staging' && <Cloud className="w-4 h-4 text-warning-400" />}
+                    {env === 'production' && <Globe className="w-4 h-4 text-danger-400" />}
+                    <span className="text-sm font-medium text-white">
+                      {envLabels[env]}
+                    </span>
+                  </div>
+                  <p className="text-xs text-dark-400">
+                    {env === 'production' ? '3级审批' : '2级审批'}
+                  </p>
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -464,7 +639,7 @@ export function ReleaseApproval() {
               className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
             >
               <option value="">不指定发布窗口</option>
-              {releaseWindows.map((w) => (
+              {envWindows.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name} - {formatDateTime(w.startTime)}
                 </option>
@@ -537,6 +712,53 @@ export function ReleaseApproval() {
               onChange={(e) => setApplyDesc(e.target.value)}
               placeholder="请描述本次发布的内容..."
               className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50 resize-none"
+            />
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showRollbackModal}
+        onClose={() => {
+          setShowRollbackModal(false);
+          setRollbackReason('');
+        }}
+        title="回滚发布"
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => {
+            setShowRollbackModal(false);
+            setRollbackReason('');
+          }}>
+              取消
+            </Button>
+            <Button variant="danger" onClick={handleRollback} disabled={!rollbackReason}>
+              确认回滚
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="p-3 bg-danger-500/10 border border-danger-500/20 rounded-lg">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-5 h-5 text-danger-400" />
+              <span className="text-sm text-danger-300 font-medium">回滚操作不可撤销</span>
+            </div>
+            <p className="text-xs text-dark-400 mt-2">
+              回滚后发布状态将变为已回滚，请谨慎操作。
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-1.5">
+              回滚原因
+            </label>
+            <textarea
+              rows={4}
+              value={rollbackReason}
+              onChange={(e) => setRollbackReason(e.target.value)}
+              placeholder="请输入回滚原因..."
+              className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-danger-500/50 resize-none"
             />
           </div>
         </div>
@@ -670,6 +892,10 @@ function ReleaseCard({ release, isSelected, onClick }: ReleaseCardProps) {
           <StatusBadge status={release.status} size="sm" />
         </div>
 
+        <div className="flex items-center gap-2 mb-3">
+          <EnvBadge environment={release.environment} />
+        </div>
+
         <p className="text-sm text-dark-400 mb-3">{project?.name}</p>
 
         <div className="flex items-center justify-between text-sm">
@@ -732,8 +958,13 @@ interface ReleaseDetailProps {
   setApproveComment: (value: string) => void;
   rejectComment: string;
   setRejectComment: (value: string) => void;
+  canApprove: boolean;
+  canRelease: boolean;
+  canRollback: boolean;
   onApprove: () => void;
   onReject: () => void;
+  onMarkReleased: () => void;
+  onRollback: () => void;
   onDownloadArtifact: () => void;
 }
 
@@ -744,8 +975,13 @@ function ReleaseDetail({
   setApproveComment,
   rejectComment,
   setRejectComment,
+  canApprove,
+  canRelease,
+  canRollback,
   onApprove,
   onReject,
+  onMarkReleased,
+  onRollback,
   onDownloadArtifact,
 }: ReleaseDetailProps) {
   const project = getProjectById(release.projectId);
@@ -766,12 +1002,53 @@ function ReleaseDetail({
     setShowReject(false);
   };
 
+  const getActionIcon = (action: AuditLog['action']) => {
+    switch (action) {
+      case 'submit':
+        return <Send className="w-4 h-4" />;
+      case 'approve':
+        return <CheckCircle2 className="w-4 h-4" />;
+      case 'reject':
+        return <XCircle className="w-4 h-4" />;
+      case 'download_artifact':
+        return <Download className="w-4 h-4" />;
+      case 'release':
+        return <Rocket className="w-4 h-4" />;
+      case 'rollback':
+        return <RotateCcw className="w-4 h-4" />;
+      default:
+        return <MessageSquare className="w-4 h-4" />;
+    }
+  };
+
+  const getActionColor = (action: AuditLog['action']) => {
+    switch (action) {
+      case 'submit':
+        return 'bg-primary-500/20 text-primary-400';
+      case 'approve':
+        return 'bg-success-500/20 text-success-400';
+      case 'reject':
+        return 'bg-danger-500/20 text-danger-400';
+      case 'download_artifact':
+        return 'bg-primary-500/20 text-primary-400';
+      case 'release':
+        return 'bg-success-500/20 text-success-400';
+      case 'rollback':
+        return 'bg-warning-500/20 text-warning-400';
+      default:
+        return 'bg-dark-600 text-dark-300';
+    }
+  };
+
   return (
     <Card>
       <Card.Body className="space-y-6">
-        <div>
+      <div>
           <div className="flex items-center justify-between">
-            <h3 className="text-xl font-semibold text-white">{release.title}</h3>
+            <div className="flex items-center gap-3">
+              <h3 className="text-xl font-semibold text-white">{release.title}</h3>
+              <EnvBadge environment={release.environment} />
+            </div>
             <StatusBadge status={release.status} />
           </div>
           <p className="text-sm text-dark-400 mt-1">{project?.name}</p>
@@ -806,7 +1083,9 @@ function ReleaseDetail({
                 ? '审批通过'
                 : release.status === 'rejected'
                 ? '已驳回'
-                : '已发布'}
+                : release.status === 'released'
+                ? '已发布'
+                : '已回滚'}
             </p>
           </div>
         </div>
@@ -943,7 +1222,58 @@ function ReleaseDetail({
           </div>
         </div>
 
-        {release.status === 'pending' && hasPendingApproval && (
+        <div>
+          <h4 className="font-medium text-white mb-3 flex items-center gap-2">
+            <History className="w-4 h-4" />
+            审计日志
+          </h4>
+          <div className="space-y-3">
+            {release.auditLogs.map((log, index) => {
+              const isLast = index === release.auditLogs.length - 1;
+              return (
+                <div key={log.id} className="relative">
+                  <div className="flex items-start gap-3">
+                    <div className={cn(
+                      'w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0',
+                      getActionColor(log.action)
+                    )}>
+                      {getActionIcon(log.action)}
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-white text-sm">
+                            {log.userName || '未知用户'}
+                          </span>
+                        </div>
+                        <span className="text-xs text-dark-500">
+                          {formatDateTime(log.timestamp)}
+                        </span>
+                      </div>
+                      <p className="text-sm text-dark-300 mt-0.5">
+                        {log.description}
+                      </p>
+                      {log.details && Object.keys(log.details).length > 0 && (
+                        <div className="mt-1 text-xs text-dark-500">
+                          {Object.entries(log.details).map(([key, value]) => (
+                            <span key={key} className="mr-2">
+                              {key}: {value}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {!isLast && (
+                    <div className="absolute left-4 top-8 bottom-0 w-0.5 bg-dark-700" />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {canApprove && hasPendingApproval && (
           <div className="flex gap-3 pt-4 border-t border-dark-700/50">
             <Button variant="secondary" className="flex-1" onClick={() => {
               setShowReject(true);
@@ -956,6 +1286,22 @@ function ReleaseDetail({
               setShowReject(false);
             }}>
               通过
+            </Button>
+          </div>
+        )}
+
+        {canRelease && (
+          <div className="pt-4 border-t border-dark-700/50">
+            <Button className="w-full" onClick={onMarkReleased}>
+              标记已发布
+            </Button>
+          </div>
+        )}
+
+        {canRollback && (
+          <div className="pt-4 border-t border-dark-700/50">
+            <Button variant="danger" className="w-full" leftIcon={<RotateCcw className="w-4 h-4" />} onClick={onRollback}>
+              回滚
             </Button>
           </div>
         )}
