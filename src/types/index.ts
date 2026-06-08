@@ -218,3 +218,25 @@ export interface TestConclusion {
   failedCases: number;
   createdAt: string;
 }
+
+export type TimelineEventType =
+  | 'triggered'
+  | 'queued'
+  | 'stage_start'
+  | 'stage_end'
+  | 'stage_rerun'
+  | 'failed'
+  | 'test_conclusion'
+  | 'completed';
+
+export interface BuildTimelineEvent {
+  id: string;
+  buildId: string;
+  type: TimelineEventType;
+  title: string;
+  description?: string;
+  timestamp: string;
+  stageId?: string;
+  userId?: string;
+  status?: string;
+}

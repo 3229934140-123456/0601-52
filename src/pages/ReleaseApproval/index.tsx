@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   Rocket,
   Clock,
@@ -16,6 +16,12 @@ import {
   Send,
   Trash2,
   X,
+  Download,
+  Package,
+  HardDrive,
+  Filter,
+  UserPlus,
+  Minus,
 } from 'lucide-react';
 import { Card } from '@/components/common/Card';
 import { Button } from '@/components/common/Button';
@@ -23,13 +29,16 @@ import { StatusBadge } from '@/components/common/StatusBadge';
 import { Tabs } from '@/components/common/Tabs';
 import { Modal } from '@/components/common/Modal';
 import { useReleaseStore } from '@/store/useReleaseStore';
+import { useArtifactStore } from '@/store/useArtifactStore';
 import { getProjectById } from '@/data/projects';
-import { getArtifactById, getArtifactsByProject } from '@/data/artifacts';
-import { getUserById } from '@/data/teams';
+import { getUserById, users } from '@/data/teams';
 import { projects } from '@/data/projects';
 import { formatDateTime, formatRelativeTime } from '@/utils/date';
+import { formatFileSize } from '@/utils/format';
 import { cn } from '@/lib/utils';
-import type { Release, ReleaseStatus, NotificationSubscription } from '@/types';
+import type { Release, ReleaseStatus, NotificationSubscription, Artifact } from '@/types';
+
+type ListFilter = 'all' | 'pending_me' | 'mine' | 'completed';
 
 export function ReleaseApproval() {
   const {
@@ -42,10 +51,17 @@ export function ReleaseApproval() {
     toggleSubscription,
     addSubscription,
     removeSubscription,
+    getPendingMyApproval,
+    getMyReleases,
+    getCompletedReleases,
+    getReleasesByStatus,
+    currentUserId,
   } = useReleaseStore();
 
+  const { artifacts, getArtifactsByProject, downloadArtifact, getArtifactById } = useArtifactStore();
+
   const [activeTab, setActiveTab] = useState('list');
-  const [filterStatus, setFilterStatus] = useState<ReleaseStatus | 'all'>('all');
+  const [listFilter, setListFilter] = useState<ListFilter>('all');
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
@@ -56,6 +72,7 @@ export function ReleaseApproval() {
   const [applyArtifact, setApplyArtifact] = useState('');
   const [applyWindow, setApplyWindow] = useState('');
   const [applyDesc, setApplyDesc] = useState('');
+  const [applyApprovers, setApplyApprovers] = useState<string[]>(['user-4', 'user-6']);
 
   const [approveComment, setApproveComment] = useState('');
   const [rejectComment, setRejectComment] = useState('');
@@ -70,14 +87,45 @@ export function ReleaseApproval() {
     { key: 'subscriptions', label: '通知订阅' },
   ];
 
-  const filteredReleases = releases
-    .filter((r) => filterStatus === 'all' || r.status === filterStatus)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const filteredReleases = useMemo(() => {
+    switch (listFilter) {
+      case 'pending_me':
+        return getPendingMyApproval();
+      case 'mine':
+        return getMyReleases();
+      case 'completed':
+        return getCompletedReleases();
+      default:
+        return getReleasesByStatus('all');
+    }
+  }, [listFilter, releases, getPendingMyApproval, getMyReleases, getCompletedReleases, getReleasesByStatus]);
 
   const projectArtifacts = applyProject ? getArtifactsByProject(applyProject) : [];
 
+  const canAddApprover = applyApprovers.length < 5;
+  const canRemoveApprover = applyApprovers.length > 1;
+
+  const handleAddApprover = () => {
+    if (!canAddApprover) return;
+    const availableUser = users.find((u) => !applyApprovers.includes(u.id));
+    if (availableUser) {
+      setApplyApprovers([...applyApprovers, availableUser.id]);
+    }
+  };
+
+  const handleRemoveApprover = (index: number) => {
+    if (!canRemoveApprover) return;
+    setApplyApprovers(applyApprovers.filter((_, i) => i !== index));
+  };
+
+  const handleApproverChange = (index: number, userId: string) => {
+    const newApprovers = [...applyApprovers];
+    newApprovers[index] = userId;
+    setApplyApprovers(newApprovers);
+  };
+
   const handleSubmitRelease = () => {
-    if (!applyTitle || !applyProject || !applyArtifact) return;
+    if (!applyTitle || !applyProject || !applyArtifact || applyApprovers.length === 0) return;
 
     submitRelease({
       projectId: applyProject,
@@ -85,6 +133,7 @@ export function ReleaseApproval() {
       title: applyTitle,
       description: applyDesc,
       releaseWindowId: applyWindow || undefined,
+      approvers: applyApprovers,
     });
 
     setShowApplyModal(false);
@@ -93,15 +142,13 @@ export function ReleaseApproval() {
     setApplyArtifact('');
     setApplyWindow('');
     setApplyDesc('');
+    setApplyApprovers(['user-4', 'user-6']);
   };
 
   const handleApprove = () => {
     if (!selectedRelease) return;
 
-    const pendingApproval = selectedRelease.approvals.find((a) => a.status === 'pending');
-    if (!pendingApproval) return;
-
-    approveRelease(selectedRelease.id, pendingApproval.level, approveComment);
+    approveRelease(selectedRelease.id, approveComment);
 
     const updated = releases.find((r) => r.id === selectedRelease.id);
     if (updated) {
@@ -114,10 +161,7 @@ export function ReleaseApproval() {
   const handleReject = () => {
     if (!selectedRelease) return;
 
-    const pendingApproval = selectedRelease.approvals.find((a) => a.status === 'pending');
-    if (!pendingApproval) return;
-
-    rejectRelease(selectedRelease.id, pendingApproval.level, rejectComment);
+    rejectRelease(selectedRelease.id, rejectComment);
 
     const updated = releases.find((r) => r.id === selectedRelease.id);
     if (updated) {
@@ -131,7 +175,7 @@ export function ReleaseApproval() {
     if (!newSubTarget && newSubChannel !== 'in_app') return;
 
     addSubscription({
-      userId: 'user-1',
+      userId: currentUserId,
       eventType: newSubEventType,
       channel: newSubChannel,
       target: newSubChannel === 'in_app' ? 'in_app' : newSubTarget,
@@ -146,6 +190,17 @@ export function ReleaseApproval() {
   const currentSelectedRelease = selectedRelease
     ? releases.find((r) => r.id === selectedRelease.id) || selectedRelease
     : null;
+
+  const currentArtifact = currentSelectedRelease
+    ? getArtifactById(currentSelectedRelease.artifactId)
+    : null;
+
+  const filterOptions: { key: ListFilter; label: string; count: number }[] = [
+    { key: 'all', label: '全部', count: getReleasesByStatus('all').length },
+    { key: 'pending_me', label: '待我审批', count: getPendingMyApproval().length },
+    { key: 'mine', label: '我提交的', count: getMyReleases().length },
+    { key: 'completed', label: '已结束', count: getCompletedReleases().length },
+  ];
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -173,29 +228,32 @@ export function ReleaseApproval() {
       {activeTab === 'list' && (
         <div className="space-y-4">
           <div className="flex items-center gap-4">
-            <div className="flex gap-2">
-              {(['all', 'pending', 'approved', 'rejected', 'released'] as const).map((status) => (
-                <button
-                  key={status}
-                  onClick={() => setFilterStatus(status)}
-                  className={cn(
-                    'px-3 py-1.5 text-sm rounded-lg transition-colors',
-                    filterStatus === status
-                      ? 'bg-primary-500/10 text-primary-400 border border-primary-500/20'
-                      : 'text-dark-400 hover:text-white hover:bg-dark-800'
-                  )}
-                >
-                  {status === 'all'
-                    ? '全部'
-                    : status === 'pending'
-                    ? '待审批'
-                    : status === 'approved'
-                    ? '已通过'
-                    : status === 'rejected'
-                    ? '已驳回'
-                    : '已发布'}
-                </button>
-              ))}
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-dark-400" />
+              <div className="flex gap-1">
+                {filterOptions.map((opt) => (
+                  <button
+                    key={opt.key}
+                    onClick={() => setListFilter(opt.key)}
+                    className={cn(
+                      'px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-2',
+                      listFilter === opt.key
+                        ? 'bg-primary-500/10 text-primary-400 border border-primary-500/20'
+                        : 'text-dark-400 hover:text-white hover:bg-dark-800 border border-transparent'
+                    )}
+                  >
+                    {opt.label}
+                    <span className={cn(
+                      'text-xs px-1.5 py-0.5 rounded',
+                      listFilter === opt.key
+                        ? 'bg-primary-500/20 text-primary-300'
+                        : 'bg-dark-700 text-dark-500'
+                    )}>
+                      {opt.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="ml-auto text-sm text-dark-400">
               共 {filteredReleases.length} 条申请
@@ -226,12 +284,14 @@ export function ReleaseApproval() {
               {currentSelectedRelease ? (
                 <ReleaseDetail
                   release={currentSelectedRelease}
+                  artifact={currentArtifact}
                   approveComment={approveComment}
                   setApproveComment={setApproveComment}
                   rejectComment={rejectComment}
                   setRejectComment={setRejectComment}
                   onApprove={handleApprove}
                   onReject={handleReject}
+                  onDownloadArtifact={() => currentArtifact && downloadArtifact(currentArtifact.id)}
                 />
               ) : (
                 <Card>
@@ -332,7 +392,7 @@ export function ReleaseApproval() {
             </Button>
             <Button
               onClick={handleSubmitRelease}
-              disabled={!applyTitle || !applyProject || !applyArtifact}
+              disabled={!applyTitle || !applyProject || !applyArtifact || applyApprovers.length === 0}
             >
               提交申请
             </Button>
@@ -387,7 +447,7 @@ export function ReleaseApproval() {
                 <option value="">请选择制品</option>
                 {projectArtifacts.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.name} - {a.version}
+                    {a.name} - {a.version} ({formatFileSize(a.size)})
                   </option>
                 ))}
               </select>
@@ -410,6 +470,61 @@ export function ReleaseApproval() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-dark-200">
+                审批人设置
+              </label>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => handleRemoveApprover(applyApprovers.length - 1)}
+                  disabled={!canRemoveApprover}
+                  className={cn(
+                    'p-1 rounded transition-colors',
+                    canRemoveApprover
+                      ? 'text-dark-400 hover:text-white hover:bg-dark-700'
+                      : 'text-dark-600 cursor-not-allowed'
+                  )}
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleAddApprover}
+                  disabled={!canAddApprover}
+                  className={cn(
+                    'p-1 rounded transition-colors',
+                    canAddApprover
+                      ? 'text-dark-400 hover:text-white hover:bg-dark-700'
+                      : 'text-dark-600 cursor-not-allowed'
+                  )}
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {applyApprovers.map((approverId, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <span className="text-xs text-dark-500 w-16">第{index + 1}级</span>
+                  <select
+                    value={approverId}
+                    onChange={(e) => handleApproverChange(index, e.target.value)}
+                    className="flex-1 px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+                  >
+                    {users.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} - {u.role === 'tester' ? '测试' : u.role === 'developer' ? '开发' : u.role === 'ops' ? '运维' : '管理'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-dark-500 mt-2">
+              最多支持 5 级审批，审批将按顺序逐级进行
+            </p>
           </div>
 
           <div>
@@ -540,6 +655,7 @@ interface ReleaseCardProps {
 function ReleaseCard({ release, isSelected, onClick }: ReleaseCardProps) {
   const project = getProjectById(release.projectId);
   const applicant = getUserById(release.applicantId);
+  const currentApproval = release.approvals.find((a) => a.status === 'pending');
 
   return (
     <Card
@@ -598,6 +714,11 @@ function ReleaseCard({ release, isSelected, onClick }: ReleaseCardProps) {
               )}
             </div>
           ))}
+          {currentApproval && (
+            <span className="text-xs text-dark-500 ml-2">
+              第{currentApproval.level}级审批中
+            </span>
+          )}
         </div>
       </Card.Body>
     </Card>
@@ -606,30 +727,34 @@ function ReleaseCard({ release, isSelected, onClick }: ReleaseCardProps) {
 
 interface ReleaseDetailProps {
   release: Release;
+  artifact: Artifact | undefined;
   approveComment: string;
   setApproveComment: (value: string) => void;
   rejectComment: string;
   setRejectComment: (value: string) => void;
   onApprove: () => void;
   onReject: () => void;
+  onDownloadArtifact: () => void;
 }
 
 function ReleaseDetail({
   release,
+  artifact,
   approveComment,
   setApproveComment,
   rejectComment,
   setRejectComment,
   onApprove,
   onReject,
+  onDownloadArtifact,
 }: ReleaseDetailProps) {
   const project = getProjectById(release.projectId);
-  const artifact = getArtifactById(release.artifactId);
   const applicant = getUserById(release.applicantId);
   const [showApprove, setShowApprove] = useState(false);
   const [showReject, setShowReject] = useState(false);
 
-  const hasPendingApproval = release.approvals.some((a) => a.status === 'pending');
+  const pendingApproval = release.approvals.find((a) => a.status === 'pending');
+  const hasPendingApproval = !!pendingApproval;
 
   const handleConfirmApprove = () => {
     onApprove();
@@ -673,10 +798,56 @@ function ReleaseDetail({
             <p className="text-sm text-dark-200">{formatDateTime(release.createdAt)}</p>
           </div>
           <div className="p-3 bg-dark-700/30 rounded-lg">
-            <p className="text-xs text-dark-500 mb-1">关联制品</p>
-            <p className="text-sm text-dark-200">{artifact?.version || '-'}</p>
+            <p className="text-xs text-dark-500 mb-1">当前进度</p>
+            <p className="text-sm text-dark-200">
+              {pendingApproval
+                ? `第${pendingApproval.level}级审批中`
+                : release.status === 'approved'
+                ? '审批通过'
+                : release.status === 'rejected'
+                ? '已驳回'
+                : '已发布'}
+            </p>
           </div>
         </div>
+
+        {artifact && (
+          <div className="p-4 bg-dark-700/20 border border-dark-600 rounded-lg">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-primary-500/10 rounded-lg">
+                  <Package className="w-5 h-5 text-primary-400" />
+                </div>
+                <div>
+                  <h4 className="font-medium text-white">{artifact.name}</h4>
+                  <p className="text-xs text-dark-400">{artifact.version}</p>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                leftIcon={<Download className="w-4 h-4" />}
+                onClick={onDownloadArtifact}
+              >
+                下载
+              </Button>
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div>
+                <span className="text-dark-500">类型</span>
+                <p className="text-dark-300 mt-0.5 uppercase">{artifact.type}</p>
+              </div>
+              <div>
+                <span className="text-dark-500">大小</span>
+                <p className="text-dark-300 mt-0.5">{formatFileSize(artifact.size)}</p>
+              </div>
+              <div>
+                <span className="text-dark-500">上传时间</span>
+                <p className="text-dark-300 mt-0.5">{formatDateTime(artifact.uploadTime)}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {release.releaseWindow && (
           <div className="p-4 bg-primary-500/5 border border-primary-500/20 rounded-lg">
@@ -751,11 +922,14 @@ function ReleaseDetail({
                         </span>
                       </div>
                       {approval.comment && (
-                        <p className="text-sm text-dark-400 mt-1">{approval.comment}</p>
+                        <p className="text-sm text-dark-400 mt-1">
+                          <MessageSquare className="w-3 h-3 inline mr-1" />
+                          {approval.comment}
+                        </p>
                       )}
                       {approval.approvedAt && (
                         <p className="text-xs text-dark-500 mt-1">
-                          {formatDateTime(approval.approvedAt)}
+                          {approval.status === 'approved' ? '通过时间' : '驳回时间'}: {formatDateTime(approval.approvedAt)}
                         </p>
                       )}
                     </div>

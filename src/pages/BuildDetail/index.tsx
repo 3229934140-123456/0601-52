@@ -20,6 +20,11 @@ import {
   CheckCircle2,
   AlertTriangle,
   XOctagon,
+  History,
+  Zap,
+  Flag,
+  MessageSquare,
+  ChevronRight,
 } from 'lucide-react';
 import { useBuildStore } from '@/store/useBuildStore';
 import { Card } from '@/components/common/Card';
@@ -28,11 +33,11 @@ import { StatusBadge } from '@/components/common/StatusBadge';
 import { Tabs } from '@/components/common/Tabs';
 import { Modal } from '@/components/common/Modal';
 import { getProjectById } from '@/data/projects';
-import { getUserById } from '@/data/teams';
+import { getUserById, users } from '@/data/teams';
 import { formatDateTime, formatRelativeTime } from '@/utils/date';
 import { formatDuration, truncateHash } from '@/utils/format';
 import { cn } from '@/lib/utils';
-import type { BuildStage, BuildLog, Build, TestConclusion } from '@/types';
+import type { BuildStage, BuildLog, Build, TestConclusion, BuildTimelineEvent } from '@/types';
 
 export function BuildDetail() {
   const { buildId } = useParams<{ buildId: string }>();
@@ -47,6 +52,7 @@ export function BuildDetail() {
     getBuild,
     saveTestConclusion,
     getTestConclusion,
+    getTimeline,
   } = useBuildStore();
 
   const [activeTab, setActiveTab] = useState('stages');
@@ -63,10 +69,12 @@ export function BuildDetail() {
   const [testCases, setTestCases] = useState(0);
   const [passedCases, setPassedCases] = useState(0);
   const [failedCases, setFailedCases] = useState(0);
+  const [testTesterId, setTestTesterId] = useState('user-1');
 
   useEffect(() => {
     if (buildId) {
       setCurrentBuild(buildId);
+      setCompareBuildId(buildId);
     }
   }, [buildId, setCurrentBuild]);
 
@@ -85,6 +93,7 @@ export function BuildDetail() {
         setTestCases(conclusion.testCases);
         setPassedCases(conclusion.passedCases);
         setFailedCases(conclusion.failedCases);
+        setTestTesterId(conclusion.testerId);
       }
     }
   }, [currentBuild?.id, getTestConclusion]);
@@ -98,6 +107,7 @@ export function BuildDetail() {
   const builds = getBuilds(currentBuild.projectId);
   const otherBuilds = builds.filter((b) => b.id !== currentBuild.id);
   const testConclusion = currentBuild ? getTestConclusion(currentBuild.id) : undefined;
+  const timeline = buildId ? getTimeline(buildId) : [];
 
   const handleRerunStage = (stageId: string) => {
     if (buildId) {
@@ -111,7 +121,7 @@ export function BuildDetail() {
       buildId: currentBuild.id,
       result: testResult,
       summary: testSummary,
-      testerId: 'user-1',
+      testerId: testTesterId,
       testCases,
       passedCases,
       failedCases,
@@ -121,8 +131,26 @@ export function BuildDetail() {
     setShowTestModal(false);
   };
 
+  const handleTimelineClick = (event: BuildTimelineEvent) => {
+    if (event.stageId && currentBuild) {
+      const stage = currentBuild.stages.find((s) => s.id === event.stageId);
+      if (stage) {
+        setSelectedStage(stage);
+        if (event.type === 'failed' || event.type === 'stage_end') {
+          setActiveTab('logs');
+        } else {
+          setActiveTab('stages');
+        }
+      }
+    }
+    if (event.type === 'test_conclusion') {
+      setActiveTab('test');
+    }
+  };
+
   const tabs = [
     { key: 'stages', label: '阶段' },
+    { key: 'timeline', label: '时间线' },
     { key: 'logs', label: '日志' },
     { key: 'artifacts', label: '制品' },
     { key: 'compare', label: '对比' },
@@ -286,6 +314,30 @@ export function BuildDetail() {
         </div>
       )}
 
+      {activeTab === 'timeline' && (
+        <Card>
+          <Card.Body>
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-lg font-semibold text-white">执行时间线</h3>
+                <p className="text-sm text-dark-400 mt-1">查看构建执行的完整时间线</p>
+              </div>
+              <span className="text-sm text-dark-400">共 {timeline.length} 个事件</span>
+            </div>
+            <div className="relative">
+              {timeline.map((event, index) => (
+                <TimelineItem
+                  key={event.id}
+                  event={event}
+                  isLast={index === timeline.length - 1}
+                  onClick={() => handleTimelineClick(event)}
+                />
+              ))}
+            </div>
+          </Card.Body>
+        </Card>
+      )}
+
       {activeTab === 'logs' && (
         <Card>
           <Card.Body className="p-0">
@@ -360,7 +412,7 @@ export function BuildDetail() {
                 <label className="block text-sm text-dark-400 mb-2">构建 1</label>
                 <select
                   className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
-                  value={compareBuildId || currentBuild.id}
+                  value={compareBuildId}
                   onChange={(e) => setCompareBuildId(e.target.value)}
                 >
                   <option value="">选择构建</option>
@@ -455,7 +507,7 @@ export function BuildDetail() {
                 <div className="flex items-center gap-4 text-sm text-dark-400">
                   <div className="flex items-center gap-2">
                     <User className="w-4 h-4" />
-                    <span>测试人员: {getUserById(testConclusion.testerId)?.name || '-'}</span>
+                    <span>测试负责人: {getUserById(testConclusion.testerId)?.name || '-'}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <Clock className="w-4 h-4" />
@@ -580,6 +632,23 @@ export function BuildDetail() {
             </div>
           </div>
 
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-2">
+              测试负责人
+            </label>
+            <select
+              value={testTesterId}
+              onChange={(e) => setTestTesterId(e.target.value)}
+              className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+            >
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.name} - {u.role === 'tester' ? '测试' : u.role === 'developer' ? '开发' : u.role === 'ops' ? '运维' : '管理'}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="block text-sm text-dark-400 mb-1">用例总数</label>
@@ -624,6 +693,80 @@ export function BuildDetail() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+function TimelineItem({ event, isLast, onClick }: { event: BuildTimelineEvent; isLast: boolean; onClick: () => void }) {
+  const typeIcons: Record<string, any> = {
+    triggered: Zap,
+    queued: Clock,
+    stage_start: Play,
+    stage_end: CheckCircle,
+    stage_rerun: RotateCcw,
+    failed: XCircle,
+    test_conclusion: FileText,
+    completed: Flag,
+  };
+
+  const typeColors: Record<string, string> = {
+    triggered: 'bg-primary-500/20 text-primary-400 border-primary-500/30',
+    queued: 'bg-dark-700 text-dark-400 border-dark-600',
+    stage_start: 'bg-info-500/20 text-info-400 border-info-500/30',
+    stage_end: 'bg-success-500/20 text-success-400 border-success-500/30',
+    stage_rerun: 'bg-warning-500/20 text-warning-400 border-warning-500/30',
+    failed: 'bg-danger-500/20 text-danger-400 border-danger-500/30',
+    test_conclusion: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+    completed: 'bg-success-500/20 text-success-400 border-success-500/30',
+  };
+
+  const Icon = typeIcons[event.type] || History;
+  const hasAction = !!event.stageId || event.type === 'test_conclusion';
+
+  return (
+    <div className="relative pl-10 pb-6 last:pb-0">
+      {!isLast && (
+        <div className="absolute left-[19px] top-10 bottom-0 w-0.5 bg-dark-700" />
+      )}
+      <div
+        className={cn(
+          'absolute left-0 top-0 w-10 h-10 rounded-full flex items-center justify-center border transition-all',
+          typeColors[event.type] || 'bg-dark-700 text-dark-400 border-dark-600',
+          hasAction && 'cursor-pointer hover:scale-110'
+        )}
+        onClick={hasAction ? onClick : undefined}
+      >
+        <Icon className="w-5 h-5" />
+      </div>
+      <div
+        className={cn(
+          'bg-dark-700/30 rounded-lg p-4 border border-transparent transition-all',
+          hasAction && 'cursor-pointer hover:bg-dark-700/50 hover:border-dark-600'
+        )}
+        onClick={hasAction ? onClick : undefined}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h4 className="font-medium text-white">{event.title}</h4>
+          <span className="text-xs text-dark-500">
+            {formatDateTime(event.timestamp)}
+          </span>
+        </div>
+        {event.description && (
+          <p className="text-sm text-dark-400">{event.description}</p>
+        )}
+        {event.userId && (
+          <div className="flex items-center gap-2 mt-2 text-xs text-dark-500">
+            <User className="w-3 h-3" />
+            <span>{getUserById(event.userId)?.name || '-'}</span>
+          </div>
+        )}
+        {hasAction && (
+          <div className="flex items-center gap-1 mt-2 text-xs text-primary-400">
+            <span>点击查看详情</span>
+            <ChevronRight className="w-3 h-3" />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
