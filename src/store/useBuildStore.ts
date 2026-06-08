@@ -57,6 +57,7 @@ interface RerunRecord {
   previousStatus: string;
   previousEndTime?: string;
   failureReason?: string;
+  previousLogs: BuildLog[];
 }
 
 function generateTimeline(
@@ -216,6 +217,7 @@ interface RerunRecord {
   previousStatus: string;
   previousEndTime?: string;
   failureReason?: string;
+  previousLogs: BuildLog[];
 }
 
 interface BuildState {
@@ -238,6 +240,8 @@ interface BuildState {
   saveTestConclusion: (buildId: string, conclusion: TestConclusion) => void;
   getTestConclusion: (buildId: string) => TestConclusion | undefined;
   getTimeline: (buildId: string) => BuildTimelineEvent[];
+  getStageLogsByVersion: (buildId: string, stageId: string, version?: number) => BuildLog[];
+  getStageRerunCount: (buildId: string, stageId: string) => number;
 }
 
 export const useBuildStore = create<BuildState>((set, get) => ({
@@ -331,7 +335,8 @@ export const useBuildStore = create<BuildState>((set, get) => ({
 
       const prevStatus = stage?.status || 'pending';
       const prevEndTime = stage?.endTime;
-      const errorLog = stage?.logs.find((l) => l.level === 'error');
+      const prevLogs = stage?.logs || [];
+      const errorLog = prevLogs.find((l) => l.level === 'error');
       const failureReason = errorLog?.message;
 
       const updatedBuilds = state.builds.map((b) => {
@@ -374,6 +379,7 @@ export const useBuildStore = create<BuildState>((set, get) => ({
           previousStatus: prevStatus,
           previousEndTime: prevEndTime,
           failureReason,
+          previousLogs: prevLogs,
         },
       ];
 
@@ -416,5 +422,38 @@ export const useBuildStore = create<BuildState>((set, get) => ({
     const testConclusion = state.testConclusions[buildId];
     const rerunHistory = state.rerunHistory[buildId] || [];
     return generateTimeline(build, testConclusion, rerunHistory);
+  },
+
+  getStageLogsByVersion: (buildId, stageId, version) => {
+    const state = get();
+    const build = state.builds.find((b) => b.id === buildId) || getBuildById(buildId);
+    const stage = build?.stages.find((s) => s.id === stageId);
+    const rerunHistory = state.rerunHistory[buildId] || [];
+    const stageReruns = rerunHistory.filter((r) => r.stageId === stageId);
+
+    if (version === undefined || version === 0) {
+      return stage?.logs || [];
+    }
+
+    if (version < 0) {
+      const absVersion = Math.abs(version);
+      if (absVersion > stageReruns.length) {
+        return stage?.logs || [];
+      }
+      const rerunIndex = stageReruns.length - absVersion;
+      return stageReruns[rerunIndex].previousLogs;
+    }
+
+    if (version > 0 && version <= stageReruns.length) {
+      return stageReruns[version - 1].previousLogs;
+    }
+
+    return stage?.logs || [];
+  },
+
+  getStageRerunCount: (buildId, stageId) => {
+    const state = get();
+    const rerunHistory = state.rerunHistory[buildId] || [];
+    return rerunHistory.filter((r) => r.stageId === stageId).length;
   },
 }));

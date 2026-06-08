@@ -8,6 +8,8 @@ import type {
   EnvironmentType,
   AuditLog,
   AuditActionType,
+  EnvReleaseStats,
+  ReleaseResultType,
 } from '@/types';
 import {
   releases as mockReleases,
@@ -64,6 +66,18 @@ interface ReleaseState {
   canRelease: (releaseId: string) => boolean;
   canRollback: (releaseId: string) => boolean;
 
+  getEnvStats: (env: EnvironmentType) => EnvReleaseStats;
+  getAllEnvStats: () => EnvReleaseStats[];
+  getMinApprovalLevels: (env: EnvironmentType) => number;
+  validateApprovers: (env: EnvironmentType, approvers: string[]) => { valid: boolean; error?: string };
+  isWindowFrozen: (windowId: string) => boolean;
+  getFrozenWindows: (env?: EnvironmentType) => ReleaseWindow[];
+  canModifyApprovers: (releaseId: string) => boolean;
+  replaceApprover: (releaseId: string, level: number, newApproverId: string, reason?: string) => void;
+  addApprovalLevel: (releaseId: string, approverId: string) => void;
+  canRecordResult: (releaseId: string) => boolean;
+  recordReleaseResult: (releaseId: string, result: ReleaseResultType, note?: string) => void;
+
   submitRelease: (data: {
     projectId: string;
     artifactId: string;
@@ -72,7 +86,8 @@ interface ReleaseState {
     environment: EnvironmentType;
     releaseWindowId?: string;
     approvers: string[];
-  }) => void;
+    freezeException?: string;
+  }) => boolean;
   approveRelease: (releaseId: string, comment: string) => void;
   rejectRelease: (releaseId: string, comment: string) => void;
   markAsReleased: (releaseId: string) => void;
@@ -185,10 +200,235 @@ export const useReleaseStore = create<ReleaseState>((set, get) => ({
     return release.status === 'released';
   },
 
+  getEnvStats: (env) => {
+    const releases = get().getReleasesByEnvironment(env);
+    const total = releases.length;
+    const pending = releases.filter((r) => r.status === 'pending').length;
+    const approved = releases.filter((r) => r.status === 'approved').length;
+    const rejected = releases.filter((r) => r.status === 'rejected').length;
+    const released = releases.filter((r) => r.status === 'released').length;
+    const rolledBack = releases.filter((r) => r.status === 'rolled_back').length;
+    const frozen = releases.filter((r) => r.releaseWindow?.isFreeze).length;
+    const successRate = released > 0 ? ((released - rolledBack) / released) * 100 : 0;
+    const rollbackCount = rolledBack;
+
+    return {
+      environment: env,
+      total,
+      pending,
+      approved,
+      rejected,
+      released,
+      rolledBack,
+      frozen,
+      successRate,
+      rollbackCount,
+    };
+  },
+
+  getAllEnvStats: () => {
+    const envs: EnvironmentType[] = ['test', 'staging', 'production'];
+    return envs.map((env) => get().getEnvStats(env));
+  },
+
+  getMinApprovalLevels: (env) => {
+    const levelMap: Record<EnvironmentType, number> = {
+      production: 3,
+      staging: 2,
+      test: 1,
+    };
+    return levelMap[env];
+  },
+
+  validateApprovers: (env, approvers) => {
+    const minLevels = get().getMinApprovalLevels(env);
+    if (approvers.length < minLevels) {
+      return {
+        valid: false,
+        error: `${env} 环境至少需要 ${minLevels} 级审批`,
+      };
+    }
+    const uniqueApprovers = new Set(approvers);
+    if (uniqueApprovers.size !== approvers.length) {
+      return {
+        valid: false,
+        error: '审批人不能重复',
+      };
+    }
+    return { valid: true };
+  },
+
+  isWindowFrozen: (windowId) => {
+    const window = get().releaseWindows.find((w) => w.id === windowId);
+    return window?.isFreeze ?? false;
+  },
+
+  getFrozenWindows: (env) => {
+    let windows = get().releaseWindows.filter((w) => w.isFreeze);
+    if (env) {
+      windows = windows.filter((w) => w.environment === env);
+    }
+    return windows;
+  },
+
+  canModifyApprovers: (releaseId) => {
+    const { currentUserId } = get();
+    const release = get().getReleaseById(releaseId);
+    if (!release || release.status !== 'pending') return false;
+    const isApplicant = release.applicantId === currentUserId;
+    const user = getUserById(currentUserId);
+    const isAdmin = user?.role === 'manager' || user?.role === 'ops';
+    return isApplicant || isAdmin;
+  },
+
+  replaceApprover: (releaseId, level, newApproverId, reason) => {
+    const { currentUserId } = get();
+    if (!get().canModifyApprovers(releaseId)) return;
+
+    set((state) => {
+      const updatedReleases = state.releases.map((release) => {
+        if (release.id !== releaseId) return release;
+
+        const approvalIndex = release.approvals.findIndex((a) => a.level === level);
+        if (approvalIndex === -1) return release;
+
+        const approval = release.approvals[approvalIndex];
+        if (approval.status !== 'pending') return release;
+
+        const oldApprover = getUserById(approval.approverId);
+        const newApprover = getUserById(newApproverId);
+
+        const updatedApprovals = release.approvals.map((app, index) =>
+          index === approvalIndex
+            ? { ...app, approverId: newApproverId }
+            : app
+        );
+
+        let updatedRelease: Release = {
+          ...release,
+          approvals: updatedApprovals,
+        };
+
+        updatedRelease = addAuditLog(
+          updatedRelease,
+          'modify_approvers',
+          currentUserId,
+          `替换第${level}级审批人：${oldApprover?.name || '未知用户'} → ${newApprover?.name || '未知用户'}`,
+          {
+            level: String(level),
+            oldApproverId: approval.approverId,
+            oldApproverName: oldApprover?.name || '未知用户',
+            newApproverId,
+            newApproverName: newApprover?.name || '未知用户',
+            changeType: 'replace',
+            reason: reason || '',
+          }
+        );
+
+        return updatedRelease;
+      });
+
+      return { releases: updatedReleases };
+    });
+  },
+
+  addApprovalLevel: (releaseId, approverId) => {
+    const { currentUserId } = get();
+    if (!get().canModifyApprovers(releaseId)) return;
+
+    set((state) => {
+      const updatedReleases = state.releases.map((release) => {
+        if (release.id !== releaseId) return release;
+
+        const newLevel = release.approvals.length + 1;
+        const newApprover = getUserById(approverId);
+
+        const newApproval: Approval = {
+          id: `${release.id}-app-${newLevel}`,
+          releaseId: release.id,
+          approverId,
+          level: newLevel,
+          status: 'pending',
+          comment: '',
+        };
+
+        const updatedApprovals = [...release.approvals, newApproval];
+
+        let updatedRelease: Release = {
+          ...release,
+          approvals: updatedApprovals,
+        };
+
+        updatedRelease = addAuditLog(
+          updatedRelease,
+          'modify_approvers',
+          currentUserId,
+          `追加第${newLevel}级审批人：${newApprover?.name || '未知用户'}`,
+          {
+            level: String(newLevel),
+            newApproverId: approverId,
+            newApproverName: newApprover?.name || '未知用户',
+            changeType: 'add',
+          }
+        );
+
+        return updatedRelease;
+      });
+
+      return { releases: updatedReleases };
+    });
+  },
+
+  canRecordResult: (releaseId) => {
+    const release = get().getReleaseById(releaseId);
+    if (!release) return false;
+    return release.status === 'released' || release.status === 'rolled_back';
+  },
+
+  recordReleaseResult: (releaseId, result, note) => {
+    const { currentUserId } = get();
+    if (!get().canRecordResult(releaseId)) return;
+
+    const now = new Date().toISOString();
+
+    set((state) => {
+      const updatedReleases = state.releases.map((release) => {
+        if (release.id !== releaseId) return release;
+
+        let updatedRelease: Release = {
+          ...release,
+          releaseResult: result,
+          releaseResultNote: note,
+          releaseResultAt: now,
+        };
+
+        updatedRelease = addAuditLog(
+          updatedRelease,
+          'release_result',
+          currentUserId,
+          `登记发布结果：${result}`,
+          { result, note: note || '' }
+        );
+
+        return updatedRelease;
+      });
+
+      return { releases: updatedReleases };
+    });
+  },
+
   submitRelease: (data) => {
     const releaseId = `release-${Date.now()}`;
     const now = new Date().toISOString();
     const { currentUserId } = get();
+
+    const selectedWindow = data.releaseWindowId
+      ? get().releaseWindows.find((w) => w.id === data.releaseWindowId)
+      : undefined;
+
+    if (selectedWindow?.isFreeze && !data.freezeException) {
+      return false;
+    }
 
     const approvals: Approval[] = data.approvers.map((approverId, index) => ({
       id: `${releaseId}-app-${index + 1}`,
@@ -198,10 +438,6 @@ export const useReleaseStore = create<ReleaseState>((set, get) => ({
       status: 'pending' as const,
       comment: '',
     }));
-
-    const selectedWindow = data.releaseWindowId
-      ? get().releaseWindows.find((w) => w.id === data.releaseWindowId)
-      : undefined;
 
     const applicant = getUserById(currentUserId);
 
@@ -218,6 +454,19 @@ export const useReleaseStore = create<ReleaseState>((set, get) => ({
       },
     ];
 
+    if (selectedWindow?.isFreeze && data.freezeException) {
+      auditLogs.push({
+        id: `${releaseId}-audit-2`,
+        releaseId,
+        action: 'freeze_exception',
+        userId: currentUserId,
+        userName: applicant?.name || '未知用户',
+        description: '冻结期发布例外申请',
+        timestamp: now,
+        details: { reason: data.freezeException },
+      });
+    }
+
     const newRelease: Release = {
       id: releaseId,
       projectId: data.projectId,
@@ -230,12 +479,15 @@ export const useReleaseStore = create<ReleaseState>((set, get) => ({
       approvals,
       releaseWindow: selectedWindow,
       auditLogs,
+      freezeException: data.freezeException,
       createdAt: now,
     };
 
     set((state) => ({
       releases: [newRelease, ...state.releases],
     }));
+
+    return true;
   },
 
   approveRelease: (releaseId, comment) => {

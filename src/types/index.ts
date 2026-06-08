@@ -28,7 +28,10 @@ export type AuditActionType =
   | 'modify_approvers'
   | 'release'
   | 'rollback'
-  | 'comment';
+  | 'comment'
+  | 'freeze_exception'
+  | 'release_result';
+export type ReleaseResultType = 'success' | 'partial_success' | 'issues_found' | 'rolled_back';
 
 export interface Project {
   id: string;
@@ -157,10 +160,43 @@ export interface Release {
   approvals: Approval[];
   releaseWindow?: ReleaseWindow;
   auditLogs: AuditLog[];
+  freezeException?: string;
+  releaseResult?: ReleaseResultType;
+  releaseResultNote?: string;
+  releaseResultAt?: string;
+  relatedRollbackId?: string;
   releasedAt?: string;
   rollbackReason?: string;
   rolledBackAt?: string;
   createdAt: string;
+}
+
+export interface ApprovalChangeRecord {
+  id: string;
+  releaseId: string;
+  changedBy: string;
+  changedByName?: string;
+  changedAt: string;
+  level: number;
+  oldApproverId: string;
+  oldApproverName?: string;
+  newApproverId: string;
+  newApproverName?: string;
+  changeType: 'replace' | 'add' | 'remove';
+  reason?: string;
+}
+
+export interface EnvReleaseStats {
+  environment: EnvironmentType;
+  total: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  released: number;
+  rolledBack: number;
+  frozen: number;
+  successRate: number;
+  rollbackCount: number;
 }
 
 export interface AuditLog {

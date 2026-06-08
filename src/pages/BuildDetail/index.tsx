@@ -53,6 +53,8 @@ export function BuildDetail() {
     saveTestConclusion,
     getTestConclusion,
     getTimeline,
+    getStageLogsByVersion,
+    getStageRerunCount,
   } = useBuildStore();
 
   const [activeTab, setActiveTab] = useState('stages');
@@ -62,7 +64,10 @@ export function BuildDetail() {
   const [compareBuildId2, setCompareBuildId2] = useState('');
   const [showTestModal, setShowTestModal] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const errorLogRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [logVersion, setLogVersion] = useState(0);
+  const [highlightedLogId, setHighlightedLogId] = useState<string | null>(null);
 
   const [testResult, setTestResult] = useState<'pass' | 'fail' | 'block'>('pass');
   const [testSummary, setTestSummary] = useState('');
@@ -77,12 +82,6 @@ export function BuildDetail() {
       setCompareBuildId(buildId);
     }
   }, [buildId, setCurrentBuild]);
-
-  useEffect(() => {
-    if (autoScroll && logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-    }
-  }, [selectedStage?.logs, autoScroll]);
 
   useEffect(() => {
     if (currentBuild) {
@@ -112,6 +111,8 @@ export function BuildDetail() {
   const handleRerunStage = (stageId: string) => {
     if (buildId) {
       rerunStage(buildId, stageId);
+      setLogVersion(0);
+      setHighlightedLogId(null);
     }
   };
 
@@ -136,8 +137,41 @@ export function BuildDetail() {
       const stage = currentBuild.stages.find((s) => s.id === event.stageId);
       if (stage) {
         setSelectedStage(stage);
+        setHighlightedLogId(null);
+
+        let version = 0;
+        const rerunMatch = event.id.match(/-rerun-(\d+)$/);
+        const failedBeforeRerunMatch = event.id.match(/-failed-before-rerun-(\d+)/);
+        const endBeforeRerunMatch = event.id.match(/-end-before-rerun-(\d+)/);
+        const restartBeforeRerunMatch = event.id.match(/-restart-(\d+)/);
+
+        if (rerunMatch) {
+          const rerunIdx = parseInt(rerunMatch[1], 10);
+          version = rerunIdx + 1;
+        } else if (failedBeforeRerunMatch) {
+          const rerunIdx = parseInt(failedBeforeRerunMatch[1], 10);
+          version = rerunIdx + 1;
+        } else if (endBeforeRerunMatch) {
+          const rerunIdx = parseInt(endBeforeRerunMatch[1], 10);
+          version = rerunIdx + 1;
+        } else if (restartBeforeRerunMatch) {
+          const rerunIdx = parseInt(restartBeforeRerunMatch[1], 10);
+          version = rerunIdx + 1;
+        }
+
+        setLogVersion(version);
+
         if (event.type === 'failed' || event.type === 'stage_end') {
           setActiveTab('logs');
+          if (event.type === 'failed') {
+            setTimeout(() => {
+              const logs = buildId ? getStageLogsByVersion(buildId, event.stageId!, version) : [];
+              const firstError = logs.find((l) => l.level === 'error');
+              if (firstError) {
+                setHighlightedLogId(firstError.id);
+              }
+            }, 100);
+          }
         } else {
           setActiveTab('stages');
         }
@@ -157,9 +191,36 @@ export function BuildDetail() {
     { key: 'test', label: '测试结论' },
   ];
 
-  const filteredLogs = selectedStage?.logs.filter((log) =>
+  const currentLogs = buildId && selectedStage
+    ? getStageLogsByVersion(buildId, selectedStage.id, logVersion)
+    : selectedStage?.logs || [];
+
+  const filteredLogs = currentLogs.filter((log) =>
     log.message.toLowerCase().includes(logSearch.toLowerCase())
   ) || [];
+
+  const stageRerunCount = buildId && selectedStage
+    ? getStageRerunCount(buildId, selectedStage.id)
+    : 0;
+
+  const firstErrorLogIndex = filteredLogs.findIndex((log) => log.level === 'error');
+
+  useEffect(() => {
+    if (highlightedLogId && errorLogRef.current && logContainerRef.current) {
+      const container = logContainerRef.current;
+      const errorElement = errorLogRef.current;
+      const containerHeight = container.clientHeight;
+      const elementTop = errorElement.offsetTop;
+      const elementHeight = errorElement.clientHeight;
+      container.scrollTop = elementTop - containerHeight / 2 + elementHeight / 2;
+    }
+  }, [highlightedLogId, filteredLogs.length]);
+
+  useEffect(() => {
+    if (autoScroll && logContainerRef.current && !highlightedLogId) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [currentLogs, autoScroll, highlightedLogId]);
 
   const compareBuild1 = compareBuildId ? getBuild(compareBuildId) : undefined;
   const compareBuild2 = compareBuildId2 ? getBuild(compareBuildId2) : undefined;
@@ -293,6 +354,8 @@ export function BuildDetail() {
                 onClick={() => {
                   setSelectedStage(stage);
                   setActiveTab('logs');
+                  setLogVersion(0);
+                  setHighlightedLogId(null);
                 }}
                 onRerun={() => handleRerunStage(stage.id)}
               />
@@ -349,8 +412,52 @@ export function BuildDetail() {
                 <span className="text-sm text-dark-400">
                   {filteredLogs.length} 条日志
                 </span>
+                {stageRerunCount > 0 && (
+                  <span className="text-xs px-2 py-0.5 bg-primary-500/10 text-primary-400 rounded">
+                    当前查看：{logVersion === 0 ? '最新执行' : `第${logVersion}次执行`}日志
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-3">
+                {stageRerunCount > 0 && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => {
+                        setLogVersion(Math.max(0, logVersion - 1));
+                        setHighlightedLogId(null);
+                      }}
+                      disabled={logVersion === 0}
+                      className={cn(
+                        'p-1.5 rounded-lg transition-colors',
+                        logVersion === 0
+                          ? 'text-dark-600 cursor-not-allowed'
+                          : 'text-dark-400 hover:bg-dark-700'
+                      )}
+                      title="上一版日志"
+                    >
+                      <ChevronRight className="w-4 h-4 rotate-180" />
+                    </button>
+                    <span className="text-xs text-dark-400 w-20 text-center">
+                      {logVersion === 0 ? '最新' : `第${logVersion}次`}
+                    </span>
+                    <button
+                      onClick={() => {
+                        setLogVersion(Math.min(stageRerunCount, logVersion + 1));
+                        setHighlightedLogId(null);
+                      }}
+                      disabled={logVersion >= stageRerunCount}
+                      className={cn(
+                        'p-1.5 rounded-lg transition-colors',
+                        logVersion >= stageRerunCount
+                          ? 'text-dark-600 cursor-not-allowed'
+                          : 'text-dark-400 hover:bg-dark-700'
+                      )}
+                      title="下一版日志"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
                 <div className="relative">
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-dark-500" />
                   <input
@@ -362,7 +469,12 @@ export function BuildDetail() {
                   />
                 </div>
                 <button
-                  onClick={() => setAutoScroll(!autoScroll)}
+                  onClick={() => {
+                    setAutoScroll(!autoScroll);
+                    if (autoScroll) {
+                      setHighlightedLogId(null);
+                    }
+                  }}
                   className={cn(
                     'p-1.5 rounded-lg transition-colors',
                     autoScroll
@@ -382,7 +494,13 @@ export function BuildDetail() {
             >
               {filteredLogs.length > 0 ? (
                 filteredLogs.map((log, index) => (
-                  <LogLine key={log.id} log={log} index={index} />
+                  <LogLine
+                    key={log.id}
+                    log={log}
+                    index={index}
+                    highlight={highlightedLogId === log.id}
+                    setErrorRef={highlightedLogId === log.id ? (el) => { errorLogRef.current = el; } : undefined}
+                  />
                 ))
               ) : (
                 <div className="text-center text-dark-500 py-8">
@@ -1043,7 +1161,7 @@ function StageDetail({ stage }: { stage: BuildStage }) {
   );
 }
 
-function LogLine({ log, index }: { log: BuildLog; index: number }) {
+function LogLine({ log, index, highlight, setErrorRef }: { log: BuildLog; index: number; highlight?: boolean; setErrorRef?: (el: HTMLDivElement | null) => void }) {
   const levelColors = {
     info: 'text-dark-300',
     warn: 'text-warning-400',
@@ -1053,9 +1171,11 @@ function LogLine({ log, index }: { log: BuildLog; index: number }) {
 
   return (
     <div
+      ref={setErrorRef}
+      data-highlight={highlight ? 'true' : 'false'}
       className={cn(
-        'flex gap-4 py-0.5 hover:bg-dark-800/50 transition-colors',
-        'animate-fade-in'
+        'flex gap-4 py-0.5 transition-colors animate-fade-in',
+        highlight ? 'bg-danger-500/20 border-l-2 border-danger-500' : 'hover:bg-dark-800/50'
       )}
       style={{ animationDelay: `${index * 10}ms` }}
     >
