@@ -14,28 +14,55 @@ import {
   AlertCircle,
   CalendarClock,
   Send,
+  Trash2,
+  X,
 } from 'lucide-react';
 import { Card } from '@/components/common/Card';
 import { Button } from '@/components/common/Button';
 import { StatusBadge } from '@/components/common/StatusBadge';
 import { Tabs } from '@/components/common/Tabs';
 import { Modal } from '@/components/common/Modal';
-import { releases, releaseWindows, notificationSubscriptions } from '@/data/releases';
+import { useReleaseStore } from '@/store/useReleaseStore';
 import { getProjectById } from '@/data/projects';
-import { getArtifactById } from '@/data/artifacts';
+import { getArtifactById, getArtifactsByProject } from '@/data/artifacts';
 import { getUserById } from '@/data/teams';
+import { projects } from '@/data/projects';
 import { formatDateTime, formatRelativeTime } from '@/utils/date';
 import { cn } from '@/lib/utils';
 import type { Release, ReleaseStatus, NotificationSubscription } from '@/types';
 
 export function ReleaseApproval() {
+  const {
+    releases,
+    releaseWindows,
+    subscriptions,
+    submitRelease,
+    approveRelease,
+    rejectRelease,
+    toggleSubscription,
+    addSubscription,
+    removeSubscription,
+  } = useReleaseStore();
+
   const [activeTab, setActiveTab] = useState('list');
   const [filterStatus, setFilterStatus] = useState<ReleaseStatus | 'all'>('all');
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [showSubscriptionModal, setShowSubscriptionModal] = useState(false);
+  const [showAddSubModal, setShowAddSubModal] = useState(false);
+
+  const [applyTitle, setApplyTitle] = useState('');
+  const [applyProject, setApplyProject] = useState('');
+  const [applyArtifact, setApplyArtifact] = useState('');
+  const [applyWindow, setApplyWindow] = useState('');
+  const [applyDesc, setApplyDesc] = useState('');
+
   const [approveComment, setApproveComment] = useState('');
   const [rejectComment, setRejectComment] = useState('');
+
+  const [newSubEventType, setNewSubEventType] = useState<'build_failed' | 'release_approved' | 'release_rejected'>('build_failed');
+  const [newSubChannel, setNewSubChannel] = useState<'email' | 'webhook' | 'in_app'>('email');
+  const [newSubTarget, setNewSubTarget] = useState('');
 
   const tabs = [
     { key: 'list', label: '发布列表' },
@@ -46,6 +73,79 @@ export function ReleaseApproval() {
   const filteredReleases = releases
     .filter((r) => filterStatus === 'all' || r.status === filterStatus)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+  const projectArtifacts = applyProject ? getArtifactsByProject(applyProject) : [];
+
+  const handleSubmitRelease = () => {
+    if (!applyTitle || !applyProject || !applyArtifact) return;
+
+    submitRelease({
+      projectId: applyProject,
+      artifactId: applyArtifact,
+      title: applyTitle,
+      description: applyDesc,
+      releaseWindowId: applyWindow || undefined,
+    });
+
+    setShowApplyModal(false);
+    setApplyTitle('');
+    setApplyProject('');
+    setApplyArtifact('');
+    setApplyWindow('');
+    setApplyDesc('');
+  };
+
+  const handleApprove = () => {
+    if (!selectedRelease) return;
+
+    const pendingApproval = selectedRelease.approvals.find((a) => a.status === 'pending');
+    if (!pendingApproval) return;
+
+    approveRelease(selectedRelease.id, pendingApproval.level, approveComment);
+
+    const updated = releases.find((r) => r.id === selectedRelease.id);
+    if (updated) {
+      setSelectedRelease({ ...updated });
+    }
+
+    setApproveComment('');
+  };
+
+  const handleReject = () => {
+    if (!selectedRelease) return;
+
+    const pendingApproval = selectedRelease.approvals.find((a) => a.status === 'pending');
+    if (!pendingApproval) return;
+
+    rejectRelease(selectedRelease.id, pendingApproval.level, rejectComment);
+
+    const updated = releases.find((r) => r.id === selectedRelease.id);
+    if (updated) {
+      setSelectedRelease({ ...updated });
+    }
+
+    setRejectComment('');
+  };
+
+  const handleAddSubscription = () => {
+    if (!newSubTarget && newSubChannel !== 'in_app') return;
+
+    addSubscription({
+      userId: 'user-1',
+      eventType: newSubEventType,
+      channel: newSubChannel,
+      target: newSubChannel === 'in_app' ? 'in_app' : newSubTarget,
+    });
+
+    setShowAddSubModal(false);
+    setNewSubEventType('build_failed');
+    setNewSubChannel('email');
+    setNewSubTarget('');
+  };
+
+  const currentSelectedRelease = selectedRelease
+    ? releases.find((r) => r.id === selectedRelease.id) || selectedRelease
+    : null;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -108,20 +208,30 @@ export function ReleaseApproval() {
                 <ReleaseCard
                   key={release.id}
                   release={release}
-                  isSelected={selectedRelease?.id === release.id}
+                  isSelected={currentSelectedRelease?.id === release.id}
                   onClick={() => setSelectedRelease(release)}
                 />
               ))}
+              {filteredReleases.length === 0 && (
+                <Card>
+                  <Card.Body className="text-center py-12 text-dark-400">
+                    <Rocket className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                    <p>暂无发布申请</p>
+                  </Card.Body>
+                </Card>
+              )}
             </div>
 
             <div className="lg:col-span-2">
-              {selectedRelease ? (
+              {currentSelectedRelease ? (
                 <ReleaseDetail
-                  release={selectedRelease}
+                  release={currentSelectedRelease}
                   approveComment={approveComment}
                   setApproveComment={setApproveComment}
                   rejectComment={rejectComment}
                   setRejectComment={setRejectComment}
+                  onApprove={handleApprove}
+                  onReject={handleReject}
                 />
               ) : (
                 <Card>
@@ -185,15 +295,26 @@ export function ReleaseApproval() {
                   订阅发布相关的通知事件
                 </p>
               </div>
-              <Button size="sm" leftIcon={<Plus className="w-4 h-4" />}>
+              <Button size="sm" leftIcon={<Plus className="w-4 h-4" />} onClick={() => setShowAddSubModal(true)}>
                 添加订阅
               </Button>
             </div>
 
             <div className="space-y-3">
-              {notificationSubscriptions.map((sub) => (
-                <SubscriptionItem key={sub.id} subscription={sub} />
+              {subscriptions.map((sub) => (
+                <SubscriptionItem
+                  key={sub.id}
+                  subscription={sub}
+                  onToggle={() => toggleSubscription(sub.id)}
+                  onRemove={() => removeSubscription(sub.id)}
+                />
               ))}
+              {subscriptions.length === 0 && (
+                <div className="text-center py-8 text-dark-400">
+                  <Bell className="w-10 h-10 mx-auto mb-2 opacity-50" />
+                  <p>暂无订阅</p>
+                </div>
+              )}
             </div>
           </Card.Body>
         </Card>
@@ -209,7 +330,12 @@ export function ReleaseApproval() {
             <Button variant="secondary" onClick={() => setShowApplyModal(false)}>
               取消
             </Button>
-            <Button onClick={() => setShowApplyModal(false)}>提交申请</Button>
+            <Button
+              onClick={handleSubmitRelease}
+              disabled={!applyTitle || !applyProject || !applyArtifact}
+            >
+              提交申请
+            </Button>
           </>
         }
       >
@@ -220,6 +346,8 @@ export function ReleaseApproval() {
             </label>
             <input
               type="text"
+              value={applyTitle}
+              onChange={(e) => setApplyTitle(e.target.value)}
               placeholder="请输入发布标题"
               className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50"
             />
@@ -230,23 +358,38 @@ export function ReleaseApproval() {
               <label className="block text-sm font-medium text-dark-200 mb-1.5">
                 选择项目
               </label>
-              <select className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50">
-                {releases.map((r) => {
-                  const project = getProjectById(r.projectId);
-                  return (
-                    <option key={r.projectId} value={r.projectId}>
-                      {project?.name}
-                    </option>
-                  );
-                })}
+              <select
+                value={applyProject}
+                onChange={(e) => {
+                  setApplyProject(e.target.value);
+                  setApplyArtifact('');
+                }}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+              >
+                <option value="">请选择项目</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-dark-200 mb-1.5">
                 选择制品
               </label>
-              <select className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50">
+              <select
+                value={applyArtifact}
+                onChange={(e) => setApplyArtifact(e.target.value)}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+                disabled={!applyProject}
+              >
                 <option value="">请选择制品</option>
+                {projectArtifacts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name} - {a.version}
+                  </option>
+                ))}
               </select>
             </div>
           </div>
@@ -255,7 +398,12 @@ export function ReleaseApproval() {
             <label className="block text-sm font-medium text-dark-200 mb-1.5">
               发布窗口
             </label>
-            <select className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50">
+            <select
+              value={applyWindow}
+              onChange={(e) => setApplyWindow(e.target.value)}
+              className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+            >
+              <option value="">不指定发布窗口</option>
               {releaseWindows.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name} - {formatDateTime(w.startTime)}
@@ -270,26 +418,11 @@ export function ReleaseApproval() {
             </label>
             <textarea
               rows={4}
+              value={applyDesc}
+              onChange={(e) => setApplyDesc(e.target.value)}
               placeholder="请描述本次发布的内容..."
               className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50 resize-none"
             />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-dark-200 mb-1.5">
-              审批人
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {['赵强', '刘伟'].map((name) => (
-                <span
-                  key={name}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 bg-dark-700/50 rounded-lg text-sm text-dark-200"
-                >
-                  <User className="w-4 h-4" />
-                  {name}
-                </span>
-              ))}
-            </div>
           </div>
         </div>
       </Modal>
@@ -300,10 +433,98 @@ export function ReleaseApproval() {
         title="通知订阅"
         size="md"
       >
-        <div className="space-y-4">
-          {notificationSubscriptions.map((sub) => (
-            <SubscriptionItem key={sub.id} subscription={sub} />
+        <div className="space-y-3">
+          {subscriptions.map((sub) => (
+            <SubscriptionItem
+              key={sub.id}
+              subscription={sub}
+              onToggle={() => toggleSubscription(sub.id)}
+              onRemove={() => removeSubscription(sub.id)}
+            />
           ))}
+        </div>
+      </Modal>
+
+      <Modal
+        isOpen={showAddSubModal}
+        onClose={() => setShowAddSubModal(false)}
+        title="添加订阅"
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowAddSubModal(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={handleAddSubscription}
+              disabled={newSubChannel !== 'in_app' && !newSubTarget}
+            >
+              添加
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-2">
+              事件类型
+            </label>
+            <div className="space-y-2">
+              {(['build_failed', 'release_approved', 'release_rejected'] as const).map((type) => (
+                <button
+                  key={type}
+                  onClick={() => setNewSubEventType(type)}
+                  className={cn(
+                    'w-full p-3 rounded-lg text-left transition-colors border',
+                    newSubEventType === type
+                      ? 'bg-primary-500/10 border-primary-500/30'
+                      : 'bg-dark-700/30 border-transparent hover:bg-dark-700/50'
+                  )}
+                >
+                  <span className="text-sm text-dark-200">
+                    {type === 'build_failed' ? '构建失败' : type === 'release_approved' ? '发布通过' : '发布驳回'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-2">
+              通知渠道
+            </label>
+            <div className="flex gap-2">
+              {(['email', 'webhook', 'in_app'] as const).map((channel) => (
+                <button
+                  key={channel}
+                  onClick={() => setNewSubChannel(channel)}
+                  className={cn(
+                    'flex-1 py-2 px-3 rounded-lg border text-sm transition-colors',
+                    newSubChannel === channel
+                      ? 'bg-primary-500/10 border-primary-500/30 text-primary-400'
+                      : 'bg-dark-700/30 border-dark-600 text-dark-300 hover:bg-dark-700/50'
+                  )}
+                >
+                  {channel === 'email' ? '邮件' : channel === 'webhook' ? 'Webhook' : '站内通知'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {newSubChannel !== 'in_app' && (
+            <div>
+              <label className="block text-sm font-medium text-dark-200 mb-1.5">
+                {newSubChannel === 'email' ? '邮箱地址' : 'Webhook URL'}
+              </label>
+              <input
+                type="text"
+                value={newSubTarget}
+                onChange={(e) => setNewSubTarget(e.target.value)}
+                placeholder={newSubChannel === 'email' ? '请输入邮箱地址' : '请输入 Webhook URL'}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50"
+              />
+            </div>
+          )}
         </div>
       </Modal>
     </div>
@@ -389,6 +610,8 @@ interface ReleaseDetailProps {
   setApproveComment: (value: string) => void;
   rejectComment: string;
   setRejectComment: (value: string) => void;
+  onApprove: () => void;
+  onReject: () => void;
 }
 
 function ReleaseDetail({
@@ -397,12 +620,26 @@ function ReleaseDetail({
   setApproveComment,
   rejectComment,
   setRejectComment,
+  onApprove,
+  onReject,
 }: ReleaseDetailProps) {
   const project = getProjectById(release.projectId);
   const artifact = getArtifactById(release.artifactId);
   const applicant = getUserById(release.applicantId);
   const [showApprove, setShowApprove] = useState(false);
   const [showReject, setShowReject] = useState(false);
+
+  const hasPendingApproval = release.approvals.some((a) => a.status === 'pending');
+
+  const handleConfirmApprove = () => {
+    onApprove();
+    setShowApprove(false);
+  };
+
+  const handleConfirmReject = () => {
+    onReject();
+    setShowReject(false);
+  };
 
   return (
     <Card>
@@ -532,12 +769,18 @@ function ReleaseDetail({
           </div>
         </div>
 
-        {release.status === 'pending' && (
+        {release.status === 'pending' && hasPendingApproval && (
           <div className="flex gap-3 pt-4 border-t border-dark-700/50">
-            <Button variant="secondary" className="flex-1" onClick={() => setShowReject(true)}>
+            <Button variant="secondary" className="flex-1" onClick={() => {
+              setShowReject(true);
+              setShowApprove(false);
+            }}>
               驳回
             </Button>
-            <Button className="flex-1" onClick={() => setShowApprove(true)}>
+            <Button className="flex-1" onClick={() => {
+              setShowApprove(true);
+              setShowReject(false);
+            }}>
               通过
             </Button>
           </div>
@@ -560,7 +803,7 @@ function ReleaseDetail({
               <Button size="sm" variant="secondary" onClick={() => setShowApprove(false)}>
                 取消
               </Button>
-              <Button size="sm" onClick={() => setShowApprove(false)}>
+              <Button size="sm" onClick={handleConfirmApprove}>
                 确认通过
               </Button>
             </div>
@@ -584,7 +827,7 @@ function ReleaseDetail({
               <Button size="sm" variant="secondary" onClick={() => setShowReject(false)}>
                 取消
               </Button>
-              <Button size="sm" variant="danger" onClick={() => setShowReject(false)}>
+              <Button size="sm" variant="danger" onClick={handleConfirmReject}>
                 确认驳回
               </Button>
             </div>
@@ -595,7 +838,13 @@ function ReleaseDetail({
   );
 }
 
-function SubscriptionItem({ subscription }: { subscription: NotificationSubscription }) {
+interface SubscriptionItemProps {
+  subscription: NotificationSubscription;
+  onToggle: () => void;
+  onRemove: () => void;
+}
+
+function SubscriptionItem({ subscription, onToggle, onRemove }: SubscriptionItemProps) {
   const eventLabels: Record<string, string> = {
     build_failed: '构建失败',
     release_approved: '发布通过',
@@ -630,10 +879,11 @@ function SubscriptionItem({ subscription }: { subscription: NotificationSubscrip
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
         <button
+          onClick={onToggle}
           className={cn(
-            'relative w-11 h-6 rounded-full transition-colors',
+            'relative w-11 h-6 rounded-full transition-colors flex-shrink-0',
             subscription.enabled ? 'bg-primary-500' : 'bg-dark-600'
           )}
         >
@@ -643,6 +893,13 @@ function SubscriptionItem({ subscription }: { subscription: NotificationSubscrip
               subscription.enabled ? 'left-[22px]' : 'left-0.5'
             )}
           />
+        </button>
+        <button
+          onClick={onRemove}
+          className="p-1.5 text-dark-500 hover:text-danger-400 hover:bg-danger-500/10 rounded transition-colors"
+          title="删除订阅"
+        >
+          <Trash2 className="w-4 h-4" />
         </button>
       </div>
     </div>

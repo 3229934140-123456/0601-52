@@ -207,3 +207,14 @@ export interface NotificationSubscription {
   target: string;
   enabled: boolean;
 }
+
+export interface TestConclusion {
+  buildId: string;
+  result: 'pass' | 'fail' | 'block';
+  summary: string;
+  testerId: string;
+  testCases: number;
+  passedCases: number;
+  failedCases: number;
+  createdAt: string;
+}

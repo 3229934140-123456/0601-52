@@ -54,8 +54,8 @@ export function PipelineEditor() {
 
   const handleTriggerBuild = () => {
     if (projectId) {
-      triggerBuild(projectId);
-      navigate(`/build/build-1`);
+      const newBuildId = triggerBuild(projectId);
+      navigate(`/build/${newBuildId}`);
     }
   };
 

@@ -15,6 +15,11 @@ import {
   Search,
   Download,
   GitCompare,
+  FileText,
+  Plus,
+  CheckCircle2,
+  AlertTriangle,
+  XOctagon,
 } from 'lucide-react';
 import { useBuildStore } from '@/store/useBuildStore';
 import { Card } from '@/components/common/Card';
@@ -24,11 +29,10 @@ import { Tabs } from '@/components/common/Tabs';
 import { Modal } from '@/components/common/Modal';
 import { getProjectById } from '@/data/projects';
 import { getUserById } from '@/data/teams';
-import { getBuildsByProject } from '@/data/builds';
 import { formatDateTime, formatRelativeTime } from '@/utils/date';
 import { formatDuration, truncateHash } from '@/utils/format';
 import { cn } from '@/lib/utils';
-import type { BuildStage, BuildLog, Build } from '@/types';
+import type { BuildStage, BuildLog, Build, TestConclusion } from '@/types';
 
 export function BuildDetail() {
   const { buildId } = useParams<{ buildId: string }>();
@@ -40,14 +44,25 @@ export function BuildDetail() {
     setSelectedStage,
     rerunStage,
     getBuildsByProject: getBuilds,
+    getBuild,
+    saveTestConclusion,
+    getTestConclusion,
   } = useBuildStore();
 
   const [activeTab, setActiveTab] = useState('stages');
   const [logSearch, setLogSearch] = useState('');
   const [showCompareModal, setShowCompareModal] = useState(false);
   const [compareBuildId, setCompareBuildId] = useState('');
+  const [compareBuildId2, setCompareBuildId2] = useState('');
+  const [showTestModal, setShowTestModal] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+
+  const [testResult, setTestResult] = useState<'pass' | 'fail' | 'block'>('pass');
+  const [testSummary, setTestSummary] = useState('');
+  const [testCases, setTestCases] = useState(0);
+  const [passedCases, setPassedCases] = useState(0);
+  const [failedCases, setFailedCases] = useState(0);
 
   useEffect(() => {
     if (buildId) {
@@ -61,6 +76,19 @@ export function BuildDetail() {
     }
   }, [selectedStage?.logs, autoScroll]);
 
+  useEffect(() => {
+    if (currentBuild) {
+      const conclusion = getTestConclusion(currentBuild.id);
+      if (conclusion) {
+        setTestResult(conclusion.result);
+        setTestSummary(conclusion.summary);
+        setTestCases(conclusion.testCases);
+        setPassedCases(conclusion.passedCases);
+        setFailedCases(conclusion.failedCases);
+      }
+    }
+  }, [currentBuild?.id, getTestConclusion]);
+
   if (!currentBuild) {
     return <div className="text-dark-400">加载中...</div>;
   }
@@ -69,6 +97,7 @@ export function BuildDetail() {
   const triggeredBy = getUserById(currentBuild.triggeredBy);
   const builds = getBuilds(currentBuild.projectId);
   const otherBuilds = builds.filter((b) => b.id !== currentBuild.id);
+  const testConclusion = currentBuild ? getTestConclusion(currentBuild.id) : undefined;
 
   const handleRerunStage = (stageId: string) => {
     if (buildId) {
@@ -76,16 +105,37 @@ export function BuildDetail() {
     }
   };
 
+  const handleSaveTestConclusion = () => {
+    if (!currentBuild) return;
+    const conclusion: TestConclusion = {
+      buildId: currentBuild.id,
+      result: testResult,
+      summary: testSummary,
+      testerId: 'user-1',
+      testCases,
+      passedCases,
+      failedCases,
+      createdAt: new Date().toISOString(),
+    };
+    saveTestConclusion(currentBuild.id, conclusion);
+    setShowTestModal(false);
+  };
+
   const tabs = [
     { key: 'stages', label: '阶段' },
     { key: 'logs', label: '日志' },
     { key: 'artifacts', label: '制品' },
     { key: 'compare', label: '对比' },
+    { key: 'test', label: '测试结论' },
   ];
 
   const filteredLogs = selectedStage?.logs.filter((log) =>
     log.message.toLowerCase().includes(logSearch.toLowerCase())
   ) || [];
+
+  const compareBuild1 = compareBuildId ? getBuild(compareBuildId) : undefined;
+  const compareBuild2 = compareBuildId2 ? getBuild(compareBuildId2) : undefined;
+  const hasBothBuilds = compareBuild1 && compareBuild2;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -115,8 +165,19 @@ export function BuildDetail() {
         <div className="flex items-center gap-3">
           <Button
             variant="secondary"
+            leftIcon={<FileText className="w-4 h-4" />}
+            onClick={() => setShowTestModal(true)}
+          >
+            登记测试结论
+          </Button>
+          <Button
+            variant="secondary"
             leftIcon={<GitCompare className="w-4 h-4" />}
-            onClick={() => setShowCompareModal(true)}
+            onClick={() => {
+              setCompareBuildId(currentBuild.id);
+              setCompareBuildId2('');
+              setShowCompareModal(true);
+            }}
           >
             对比构建
           </Button>
@@ -267,9 +328,15 @@ export function BuildDetail() {
               ref={logContainerRef}
               className="h-96 overflow-y-auto bg-dark-900 p-4 font-mono text-sm"
             >
-              {filteredLogs.map((log, index) => (
-                <LogLine key={log.id} log={log} index={index} />
-              ))}
+              {filteredLogs.length > 0 ? (
+                filteredLogs.map((log, index) => (
+                  <LogLine key={log.id} log={log} index={index} />
+                ))
+              ) : (
+                <div className="text-center text-dark-500 py-8">
+                  暂无日志数据
+                </div>
+              )}
             </div>
           </Card.Body>
         </Card>
@@ -293,11 +360,15 @@ export function BuildDetail() {
                 <label className="block text-sm text-dark-400 mb-2">构建 1</label>
                 <select
                   className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
-                  defaultValue={currentBuild.id}
+                  value={compareBuildId || currentBuild.id}
+                  onChange={(e) => setCompareBuildId(e.target.value)}
                 >
-                  <option value={currentBuild.id}>
-                    构建 #{currentBuild.id.split('-')[1]}
-                  </option>
+                  <option value="">选择构建</option>
+                  {builds.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      构建 #{b.id.split('-')[1]} - {b.commitMessage}
+                    </option>
+                  ))}
                 </select>
               </div>
               <div className="text-dark-400 pt-6">VS</div>
@@ -305,10 +376,11 @@ export function BuildDetail() {
                 <label className="block text-sm text-dark-400 mb-2">构建 2</label>
                 <select
                   className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
-                  defaultValue=""
+                  value={compareBuildId2}
+                  onChange={(e) => setCompareBuildId2(e.target.value)}
                 >
                   <option value="">选择要对比的构建</option>
-                  {otherBuilds.slice(0, 5).map((b) => (
+                  {otherBuilds.map((b) => (
                     <option key={b.id} value={b.id}>
                       构建 #{b.id.split('-')[1]} - {b.commitMessage}
                     </option>
@@ -316,9 +388,88 @@ export function BuildDetail() {
                 </select>
               </div>
             </div>
-            <p className="text-center text-dark-400 py-8">
-              选择两个构建进行对比
-            </p>
+
+            {hasBothBuilds ? (
+              <CompareResult build1={compareBuild1!} build2={compareBuild2!} />
+            ) : (
+              <p className="text-center text-dark-400 py-8">
+                选择两个构建进行对比
+              </p>
+            )}
+          </Card.Body>
+        </Card>
+      )}
+
+      {activeTab === 'test' && (
+        <Card>
+          <Card.Body>
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h3 className="text-lg font-semibold text-white">测试结论</h3>
+                <p className="text-sm text-dark-400 mt-1">查看和管理本次构建的测试结果</p>
+              </div>
+              <Button size="sm" leftIcon={<Plus className="w-4 h-4" />} onClick={() => setShowTestModal(true)}>
+                {testConclusion ? '编辑结论' : '登记结论'}
+              </Button>
+            </div>
+
+            {testConclusion ? (
+              <div className="space-y-6">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="p-4 bg-dark-700/30 rounded-lg">
+                    <p className="text-xs text-dark-400 mb-1">测试结果</p>
+                    <div className="flex items-center gap-2">
+                      {testConclusion.result === 'pass' && (
+                        <CheckCircle2 className="w-5 h-5 text-success-500" />
+                      )}
+                      {testConclusion.result === 'fail' && (
+                        <XOctagon className="w-5 h-5 text-danger-500" />
+                      )}
+                      {testConclusion.result === 'block' && (
+                        <AlertTriangle className="w-5 h-5 text-warning-500" />
+                      )}
+                      <span className="text-lg font-semibold text-white">
+                        {testConclusion.result === 'pass' ? '通过' : testConclusion.result === 'fail' ? '失败' : '阻塞'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="p-4 bg-dark-700/30 rounded-lg">
+                    <p className="text-xs text-dark-400 mb-1">用例总数</p>
+                    <p className="text-lg font-semibold text-white">{testConclusion.testCases}</p>
+                  </div>
+                  <div className="p-4 bg-dark-700/30 rounded-lg">
+                    <p className="text-xs text-dark-400 mb-1">通过用例</p>
+                    <p className="text-lg font-semibold text-success-400">{testConclusion.passedCases}</p>
+                  </div>
+                  <div className="p-4 bg-dark-700/30 rounded-lg">
+                    <p className="text-xs text-dark-400 mb-1">失败用例</p>
+                    <p className="text-lg font-semibold text-danger-400">{testConclusion.failedCases}</p>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-sm text-dark-400 mb-2">结论说明</p>
+                  <p className="text-dark-200 whitespace-pre-wrap">{testConclusion.summary || '无'}</p>
+                </div>
+
+                <div className="flex items-center gap-4 text-sm text-dark-400">
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4" />
+                    <span>测试人员: {getUserById(testConclusion.testerId)?.name || '-'}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-4 h-4" />
+                    <span>登记时间: {formatDateTime(testConclusion.createdAt)}</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-dark-400">
+                <FileText className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                <p>暂无测试结论</p>
+                <p className="text-sm mt-1">点击上方按钮登记测试结论</p>
+              </div>
+            )}
           </Card.Body>
         </Card>
       )}
@@ -327,7 +478,7 @@ export function BuildDetail() {
         isOpen={showCompareModal}
         onClose={() => setShowCompareModal(false)}
         title="对比构建"
-        size="sm"
+        size="md"
         footer={
           <>
             <Button variant="secondary" onClick={() => setShowCompareModal(false)}>
@@ -338,39 +489,307 @@ export function BuildDetail() {
                 setShowCompareModal(false);
                 setActiveTab('compare');
               }}
-              disabled={!compareBuildId}
+              disabled={!compareBuildId2}
             >
-              对比
+              查看对比
             </Button>
           </>
         }
       >
-        <div className="space-y-2">
-          <p className="text-sm text-dark-400 mb-3">选择要对比的构建</p>
-          {otherBuilds.slice(0, 5).map((build) => (
-            <button
-              key={build.id}
-              onClick={() => setCompareBuildId(build.id)}
-              className={cn(
-                'w-full p-3 rounded-lg text-left transition-colors',
-                compareBuildId === build.id
-                  ? 'bg-primary-500/10 border border-primary-500/30'
-                  : 'bg-dark-700/30 hover:bg-dark-700/50 border border-transparent'
-              )}
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm text-dark-400 mb-2">构建 1</label>
+            <select
+              className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+              value={compareBuildId}
+              onChange={(e) => setCompareBuildId(e.target.value)}
             >
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-white">
-                  构建 #{build.id.split('-')[1]}
-                </span>
-                <StatusBadge status={build.status} size="sm" />
-              </div>
-              <p className="text-sm text-dark-400 mt-1 truncate">
-                {build.commitMessage}
-              </p>
-            </button>
-          ))}
+              {builds.map((b) => (
+                <option key={b.id} value={b.id}>
+                  构建 #{b.id.split('-')[1]} - {b.commitMessage}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-dark-400 mb-2">构建 2</label>
+            {otherBuilds.slice(0, 6).map((build) => (
+              <button
+                key={build.id}
+                onClick={() => setCompareBuildId2(build.id)}
+                className={cn(
+                  'w-full p-3 rounded-lg text-left transition-colors mt-2',
+                  compareBuildId2 === build.id
+                    ? 'bg-primary-500/10 border border-primary-500/30'
+                    : 'bg-dark-700/30 hover:bg-dark-700/50 border border-transparent'
+                )}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-white">
+                    构建 #{build.id.split('-')[1]}
+                  </span>
+                  <StatusBadge status={build.status} size="sm" />
+                </div>
+                <p className="text-sm text-dark-400 mt-1 truncate">
+                  {build.commitMessage}
+                </p>
+              </button>
+            ))}
+          </div>
         </div>
       </Modal>
+
+      <Modal
+        isOpen={showTestModal}
+        onClose={() => setShowTestModal(false)}
+        title="登记测试结论"
+        size="md"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setShowTestModal(false)}>
+              取消
+            </Button>
+            <Button onClick={handleSaveTestConclusion}>保存</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-2">
+              测试结果
+            </label>
+            <div className="flex gap-3">
+              {(['pass', 'fail', 'block'] as const).map((result) => (
+                <button
+                  key={result}
+                  onClick={() => setTestResult(result)}
+                  className={cn(
+                    'flex-1 py-2 px-3 rounded-lg border transition-colors text-sm font-medium',
+                    testResult === result
+                      ? result === 'pass'
+                        ? 'bg-success-500/10 border-success-500/30 text-success-400'
+                        : result === 'fail'
+                        ? 'bg-danger-500/10 border-danger-500/30 text-danger-400'
+                        : 'bg-warning-500/10 border-warning-500/30 text-warning-400'
+                      : 'bg-dark-700/30 border-dark-600 text-dark-300 hover:bg-dark-700/50'
+                  )}
+                >
+                  {result === 'pass' ? '通过' : result === 'fail' ? '失败' : '阻塞'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="block text-sm text-dark-400 mb-1">用例总数</label>
+              <input
+                type="number"
+                value={testCases}
+                onChange={(e) => setTestCases(Number(e.target.value))}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 focus:outline-none focus:border-primary-500/50"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-dark-400 mb-1">通过用例</label>
+              <input
+                type="number"
+                value={passedCases}
+                onChange={(e) => setPassedCases(Number(e.target.value))}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-success-400 focus:outline-none focus:border-primary-500/50"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-dark-400 mb-1">失败用例</label>
+              <input
+                type="number"
+                value={failedCases}
+                onChange={(e) => setFailedCases(Number(e.target.value))}
+                className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-danger-400 focus:outline-none focus:border-primary-500/50"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-dark-200 mb-1.5">
+              结论说明
+            </label>
+            <textarea
+              rows={4}
+              value={testSummary}
+              onChange={(e) => setTestSummary(e.target.value)}
+              placeholder="请输入测试结论说明..."
+              className="w-full px-3 py-2 bg-dark-700/50 border border-dark-600 rounded-lg text-dark-100 placeholder-dark-500 focus:outline-none focus:border-primary-500/50 resize-none"
+            />
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function CompareResult({ build1, build2 }: { build1: Build; build2: Build }) {
+  const statusColors: Record<string, string> = {
+    success: 'text-success-400',
+    failed: 'text-danger-400',
+    running: 'text-primary-400',
+    pending: 'text-dark-400',
+    cancelled: 'text-dark-400',
+  };
+
+  const statusLabels: Record<string, string> = {
+    success: '成功',
+    failed: '失败',
+    running: '运行中',
+    pending: '待执行',
+    cancelled: '已取消',
+  };
+
+  const durationDiff = (build1.duration || 0) - (build2.duration || 0);
+  const diffPercent = build2.duration ? ((durationDiff / build2.duration) * 100).toFixed(1) : '0';
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-6">
+        <div className="p-4 bg-dark-700/20 rounded-lg border border-dark-600">
+          <p className="text-xs text-dark-400 mb-1">构建 1</p>
+          <p className="text-lg font-semibold text-white">构建 #{build1.id.split('-')[1]}</p>
+          <div className={cn('mt-2 font-medium', statusColors[build1.status])}>
+            {statusLabels[build1.status]}
+          </div>
+        </div>
+        <div className="p-4 bg-dark-700/20 rounded-lg border border-dark-600">
+          <p className="text-xs text-dark-400 mb-1">构建 2</p>
+          <p className="text-lg font-semibold text-white">构建 #{build2.id.split('-')[1]}</p>
+          <div className={cn('mt-2 font-medium', statusColors[build2.status])}>
+            {statusLabels[build2.status]}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <h4 className="font-medium text-white">基本信息对比</h4>
+        <div className="overflow-hidden rounded-lg border border-dark-700">
+          <table className="w-full text-sm">
+            <tbody className="divide-y divide-dark-700">
+              <tr>
+                <td className="px-4 py-3 text-dark-400 bg-dark-800/30 w-32">状态</td>
+                <td className={`px-4 py-3 ${statusColors[build1.status]}`}>{statusLabels[build1.status]}</td>
+                <td className={`px-4 py-3 ${statusColors[build2.status]}`}>{statusLabels[build2.status]}</td>
+              </tr>
+              <tr>
+                <td className="px-4 py-3 text-dark-400 bg-dark-800/30">触发方式</td>
+                <td className="px-4 py-3 text-dark-200">
+                  {build1.triggerType === 'manual' ? '手动触发' : build1.triggerType === 'push' ? '代码推送' : '定时触发'}
+                </td>
+                <td className="px-4 py-3 text-dark-200">
+                  {build2.triggerType === 'manual' ? '手动触发' : build2.triggerType === 'push' ? '代码推送' : '定时触发'}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-4 py-3 text-dark-400 bg-dark-800/30">总耗时</td>
+                <td className="px-4 py-3 text-dark-200">
+                  {build1.duration ? formatDuration(build1.duration) : '-'}
+                </td>
+                <td className="px-4 py-3 text-dark-200">
+                  {build2.duration ? formatDuration(build2.duration) : '-'}
+                  {durationDiff !== 0 && (
+                    <span className={cn('ml-2 text-xs', durationDiff > 0 ? 'text-danger-400' : 'text-success-400')}>
+                      {durationDiff > 0 ? '+' : ''}{diffPercent}%
+                    </span>
+                  )}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-4 py-3 text-dark-400 bg-dark-800/30">提交</td>
+                <td className="px-4 py-3 text-dark-200 font-mono text-xs">{truncateHash(build1.commitHash)}</td>
+                <td className="px-4 py-3 text-dark-200 font-mono text-xs">{truncateHash(build2.commitHash)}</td>
+              </tr>
+              <tr>
+                <td className="px-4 py-3 text-dark-400 bg-dark-800/30">提交信息</td>
+                <td className="px-4 py-3 text-dark-200">{build1.commitMessage}</td>
+                <td className="px-4 py-3 text-dark-200">{build2.commitMessage}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <h4 className="font-medium text-white">各阶段耗时对比</h4>
+        <div className="space-y-2">
+          {build1.stages.map((stage1, index) => {
+            const stage2 = build2.stages[index];
+            const d1 = stage1.duration || 0;
+            const d2 = stage2?.duration || 0;
+            const diff = d1 - d2;
+            const pct = d2 > 0 ? ((diff / d2) * 100).toFixed(1) : '0';
+
+            return (
+              <div key={stage1.id} className="p-3 bg-dark-700/30 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-medium text-dark-200">{stage1.stageName}</span>
+                  <div className="flex items-center gap-4 text-sm">
+                    <span className={statusColors[stage1.status]}>
+                      {statusLabels[stage1.status] || stage1.status}
+                    </span>
+                    <span className="text-dark-500">vs</span>
+                    <span className={statusColors[stage2?.status || 'pending']}>
+                      {statusLabels[stage2?.status || 'pending'] || stage2?.status}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 text-sm">
+                  <div className="flex-1 flex items-center justify-between">
+                    <span className="text-dark-400">构建 1</span>
+                    <span className="text-dark-200">{d1 ? formatDuration(d1) : '-'}</span>
+                  </div>
+                  {d1 > 0 && d2 > 0 && (
+                    <span className={cn(
+                      'px-2 py-0.5 rounded text-xs',
+                      diff > 0 ? 'bg-danger-500/10 text-danger-400' : diff < 0 ? 'bg-success-500/10 text-success-400' : 'text-dark-500'
+                    )}>
+                      {diff > 0 ? '+' : ''}{pct}%
+                    </span>
+                  )}
+                  <div className="flex-1 flex items-center justify-between">
+                    <span className="text-dark-400">构建 2</span>
+                    <span className="text-dark-200">{d2 ? formatDuration(d2) : '-'}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {(build1.status === 'failed' || build2.status === 'failed') && (
+        <div className="space-y-3">
+          <h4 className="font-medium text-danger-400">失败阶段</h4>
+          <div className="p-4 bg-danger-500/5 border border-danger-500/20 rounded-lg">
+            {build1.status === 'failed' && build1.stages.filter((s) => s.status === 'failed').length > 0 && (
+              <div className="mb-3">
+                <p className="text-sm text-dark-400 mb-1">构建 1 失败阶段:</p>
+                {build1.stages.filter((s) => s.status === 'failed').map((s) => (
+                  <span key={s.id} className="inline-block px-2 py-1 bg-danger-500/10 text-danger-400 rounded text-sm mr-2">
+                    {s.stageName}
+                  </span>
+                ))}
+              </div>
+            )}
+            {build2.status === 'failed' && build2.stages.filter((s) => s.status === 'failed').length > 0 && (
+              <div>
+                <p className="text-sm text-dark-400 mb-1">构建 2 失败阶段:</p>
+                {build2.stages.filter((s) => s.status === 'failed').map((s) => (
+                  <span key={s.id} className="inline-block px-2 py-1 bg-danger-500/10 text-danger-400 rounded text-sm mr-2">
+                    {s.stageName}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -406,7 +825,7 @@ function StageCard({ stage, isSelected, onClick, onRerun }: StageCardProps) {
             <div>
               <h4 className="font-medium text-white">{stage.stageName}</h4>
               <p className="text-xs text-dark-400">
-                {stage.duration ? formatDuration(stage.duration) : '等待中'}
+                {stage.duration ? formatDuration(stage.duration) : stage.status === 'running' ? '运行中' : '等待中'}
               </p>
             </div>
           </div>
@@ -459,15 +878,21 @@ function StageDetail({ stage }: { stage: BuildStage }) {
         <div>
           <h4 className="text-sm font-medium text-dark-300 mb-3">步骤</h4>
           <div className="space-y-2">
-            {stage.logs.slice(0, 5).map((log) => (
-              <div
-                key={log.id}
-                className="flex items-center gap-2 p-2 bg-dark-700/30 rounded"
-              >
-                <CheckCircle className="w-4 h-4 text-success-500 flex-shrink-0" />
-                <span className="text-sm text-dark-300 truncate">{log.message}</span>
+            {stage.logs.length > 0 ? (
+              stage.logs.slice(0, 5).map((log) => (
+                <div
+                  key={log.id}
+                  className="flex items-center gap-2 p-2 bg-dark-700/30 rounded"
+                >
+                  <CheckCircle className="w-4 h-4 text-success-500 flex-shrink-0" />
+                  <span className="text-sm text-dark-300 truncate">{log.message}</span>
+                </div>
+              ))
+            ) : (
+              <div className="text-center text-dark-500 py-4 text-sm">
+                暂无步骤数据
               </div>
-            ))}
+            )}
           </div>
         </div>
       </Card.Body>
@@ -489,7 +914,7 @@ function LogLine({ log, index }: { log: BuildLog; index: number }) {
         'flex gap-4 py-0.5 hover:bg-dark-800/50 transition-colors',
         'animate-fade-in'
       )}
-      style={{ animationDelay: `${index * 10}ms` } as React.CSSProperties}
+      style={{ animationDelay: `${index * 10}ms` }}
     >
       <span className="text-dark-600 flex-shrink-0 w-8 text-right">
         {index + 1}
